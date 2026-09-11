@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 
+import type { AiUnderstanding } from "@/lib/ai/types";
 import {
   aiAnalyzeComplaint,
   aiCheckDuplicate,
@@ -65,7 +66,10 @@ export function useAiTriage() {
   const qc = useQueryClient();
   const triage = useServerFn(aiTriageComplaint);
   return useMutation({
-    mutationFn: (complaintId: string) => triage({ data: { complaintId } }),
+    mutationFn: (input: string | { complaintId: string; understanding?: AiUnderstanding }) =>
+      triage({
+        data: typeof input === "string" ? { complaintId: input } : input,
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["complaint"] });
       qc.invalidateQueries({ queryKey: ["complaints"] });

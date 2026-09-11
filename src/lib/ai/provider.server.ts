@@ -9,9 +9,9 @@ import { GoogleGenAI, type Part } from "@google/genai";
 
 export const AI_MODELS = {
   /** Multimodal reasoning (image + text) — Gemini. */
-  vision: "gemini-2.5-flash",
+  vision: "gemini-3.6-flash",
   /** Text-only reasoning / analytics. */
-  text: "gemini-2.5-flash",
+  text: "gemini-3.6-flash",
 } as const;
 
 export class AiError extends Error {

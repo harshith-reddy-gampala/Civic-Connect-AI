@@ -225,49 +225,9 @@ END; $$;
 CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users
 FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- demo data
-INSERT INTO public.districts (id, name, code, city, center_lat, center_lng, population) VALUES
- ('11111111-1111-1111-1111-111111111101','Central Ward','CEN','Pune',18.5204,73.8567,412000),
- ('11111111-1111-1111-1111-111111111102','Riverside','RIV','Pune',18.5310,73.8446,286000),
- ('11111111-1111-1111-1111-111111111103','North Gate','NOR','Pune',18.5679,73.9143,351000),
- ('11111111-1111-1111-1111-111111111104','Tech Corridor','TEC','Pune',18.5089,73.9260,198000),
- ('11111111-1111-1111-1111-111111111105','Old Town','OLD','Pune',18.4989,73.8677,240000);
-
 INSERT INTO public.departments (id, name, code, category, contact_email) VALUES
  ('22222222-2222-2222-2222-222222222201','Roads & Transport','ROAD','roads','roads@civic.gov'),
  ('22222222-2222-2222-2222-222222222202','Water Supply','WATER','water','water@civic.gov'),
  ('22222222-2222-2222-2222-222222222203','Electricity','ELEC','electricity','power@civic.gov'),
  ('22222222-2222-2222-2222-222222222204','Sanitation','SANI','sanitation','sanitation@civic.gov'),
  ('22222222-2222-2222-2222-222222222205','Public Safety','SAFE','safety','safety@civic.gov');
-
-INSERT INTO public.officers (id, full_name, employee_code, department_id, district_id, phone, resolved_count, active_count, avg_resolution_hours, rating) VALUES
- ('33333333-3333-3333-3333-333333333301','Anil Deshmukh','OFF-1041','22222222-2222-2222-2222-222222222201','11111111-1111-1111-1111-111111111101','+91 98200 11041',148,6,31.5,4.7),
- ('33333333-3333-3333-3333-333333333302','Priya Nair','OFF-1042','22222222-2222-2222-2222-222222222202','11111111-1111-1111-1111-111111111102','+91 98200 11042',203,4,22.8,4.9),
- ('33333333-3333-3333-3333-333333333303','Rahul Mehta','OFF-1043','22222222-2222-2222-2222-222222222203','11111111-1111-1111-1111-111111111103','+91 98200 11043',96,9,44.2,4.2),
- ('33333333-3333-3333-3333-333333333304','Sneha Kulkarni','OFF-1044','22222222-2222-2222-2222-222222222204','11111111-1111-1111-1111-111111111104','+91 98200 11044',177,5,27.4,4.6),
- ('33333333-3333-3333-3333-333333333305','Imran Sheikh','OFF-1045','22222222-2222-2222-2222-222222222205','11111111-1111-1111-1111-111111111105','+91 98200 11045',121,7,38.9,4.4);
-
-INSERT INTO public.complaints (id, reference, reporter_name, reporter_phone, title, description, category, status, priority, address, lat, lng, district_id, department_id, officer_id, support_count, created_at, resolved_at) VALUES
- ('44444444-4444-4444-4444-444444444401','CIV-2A41B7C0','Meera Joshi','+91 90000 10001','Deep pothole near Mahatma bridge','A large pothole is causing two-wheeler accidents every evening. Water collects inside after rain.','roads','in_progress','critical','Mahatma Bridge Rd, Central Ward',18.5211,73.8580,'11111111-1111-1111-1111-111111111101','22222222-2222-2222-2222-222222222201','33333333-3333-3333-3333-333333333301',34, now() - interval '9 days', NULL),
- ('44444444-4444-4444-4444-444444444402','CIV-8B12CD34','Vikram Rao','+91 90000 10002','Streetlights dead on entire lane','No street lighting for the last 12 nights across 400 metres. Unsafe for women returning from work.','electricity','assigned','high','Lane 4, North Gate',18.5688,73.9151,'11111111-1111-1111-1111-111111111103','22222222-2222-2222-2222-222222222203','33333333-3333-3333-3333-333333333303',21, now() - interval '6 days', NULL),
- ('44444444-4444-4444-4444-444444444403','CIV-55EE77AA','Fatima Khan','+91 90000 10003','Drinking water contaminated','Tap water is muddy and smells since Monday. Several families reported stomach illness.','water','under_review','critical','Riverside Colony Block B',18.5316,73.8452,'11111111-1111-1111-1111-111111111102','22222222-2222-2222-2222-222222222202',NULL,48, now() - interval '3 days', NULL),
- ('44444444-4444-4444-4444-444444444404','CIV-91AC22FE','Suresh Patil','+91 90000 10004','Garbage not collected for 8 days','Overflowing bins attracting stray animals near the school entrance.','sanitation','completed','medium','Old Town Market Rd',18.4995,73.8681,'11111111-1111-1111-1111-111111111105','22222222-2222-2222-2222-222222222204','33333333-3333-3333-3333-333333333304',12, now() - interval '18 days', now() - interval '15 days'),
- ('44444444-4444-4444-4444-444444444405','CIV-C7D80011','Ananya Sen','+91 90000 10005','Broken footpath slab','Slab collapsed exposing a drain shaft, dangerous for children.','roads','completed','high','Tech Corridor Phase 2',18.5094,73.9271,'11111111-1111-1111-1111-111111111104','22222222-2222-2222-2222-222222222201','33333333-3333-3333-3333-333333333301',9, now() - interval '25 days', now() - interval '21 days'),
- ('44444444-4444-4444-4444-444444444406','CIV-4400FFAB','Joseph Dsouza','+91 90000 10006','Open transformer box','Live wires exposed at pedestrian height next to a bus stop.','electricity','submitted','critical','Central Ward Bus Depot',18.5199,73.8552,'11111111-1111-1111-1111-111111111101','22222222-2222-2222-2222-222222222203',NULL,27, now() - interval '1 day', NULL),
- ('44444444-4444-4444-4444-444444444407','CIV-1298BBCD','Neha Verma','+91 90000 10007','Sewage overflow on main road','Sewage flooding the junction, traffic diverted by locals.','sanitation','in_progress','high','Riverside Junction',18.5322,73.8461,'11111111-1111-1111-1111-111111111102','22222222-2222-2222-2222-222222222204','33333333-3333-3333-3333-333333333304',31, now() - interval '4 days', NULL),
- ('44444444-4444-4444-4444-444444444408','CIV-7711DEAA','Arjun Iyer','+91 90000 10008','Unsafe pedestrian crossing','No signal or zebra crossing near the hospital gate.','safety','under_review','medium','Old Town Hospital Rd',18.4981,73.8669,'11111111-1111-1111-1111-111111111105','22222222-2222-2222-2222-222222222205',NULL,17, now() - interval '11 days', NULL),
- ('44444444-4444-4444-4444-444444444409','CIV-3355CC12','Kiran Shah','+91 90000 10009','Leaking water main wasting supply','Continuous leak for weeks, road is permanently wet.','water','assigned','medium','North Gate Sector 7',18.5671,73.9128,'11111111-1111-1111-1111-111111111103','22222222-2222-2222-2222-222222222202','33333333-3333-3333-3333-333333333302',14, now() - interval '7 days', NULL),
- ('44444444-4444-4444-4444-444444444410','CIV-6622AB90','Divya Menon','+91 90000 10010','Traffic signal stuck on red','Signal malfunction creating a 20 minute jam each morning.','safety','completed','high','Tech Corridor Circle',18.5081,73.9249,'11111111-1111-1111-1111-111111111104','22222222-2222-2222-2222-222222222205','33333333-3333-3333-3333-333333333305',22, now() - interval '30 days', now() - interval '28 days');
-
-INSERT INTO public.complaint_images (complaint_id, image_url, kind) VALUES
- ('44444444-4444-4444-4444-444444444401','https://images.unsplash.com/photo-1516216628859-9bccecab13ca?w=1200&q=70','before'),
- ('44444444-4444-4444-4444-444444444404','https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1200&q=70','before'),
- ('44444444-4444-4444-4444-444444444407','https://images.unsplash.com/photo-1581093450021-4a7360e9a6b5?w=1200&q=70','before');
-
-INSERT INTO public.status_history (complaint_id, status, remarks, changed_by_name, created_at) VALUES
- ('44444444-4444-4444-4444-444444444401','submitted','Complaint registered by citizen.','System', now() - interval '9 days'),
- ('44444444-4444-4444-4444-444444444401','under_review','Verified by ward inspection team.','Ward Desk', now() - interval '8 days'),
- ('44444444-4444-4444-4444-444444444401','assigned','Routed to Roads & Transport.','Auto Router', now() - interval '7 days'),
- ('44444444-4444-4444-4444-444444444401','in_progress','Patch work started, material requested.','Anil Deshmukh', now() - interval '2 days'),
- ('44444444-4444-4444-4444-444444444404','submitted','Complaint registered by citizen.','System', now() - interval '18 days'),
- ('44444444-4444-4444-4444-444444444404','completed','Bins cleared and collection schedule restored.','Sneha Kulkarni', now() - interval '15 days');

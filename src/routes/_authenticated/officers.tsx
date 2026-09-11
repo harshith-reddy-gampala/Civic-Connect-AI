@@ -1,5 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { Sparkles, Star } from "lucide-react";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
 import { PageHeader } from "@/components/civic/PageHeader";
 import { StatGridSkeleton, TableSkeleton } from "@/components/civic/skeletons";
@@ -8,6 +7,9 @@ import { formatHours } from "@/lib/civic";
 import { useComplaints, useDepartments, useDistricts, useOfficers } from "@/lib/queries";
 
 export const Route = createFileRoute("/_authenticated/officers")({
+  beforeLoad: ({ context }) => {
+    if (context.role !== "department_admin") throw redirect({ to: "/dashboard" });
+  },
   head: () => ({
     meta: [
       { title: "Officer performance — CivicAI" },
@@ -54,17 +56,14 @@ function OfficersPage() {
           const district = districts.data?.find((d) => d.id === officer.district_id);
           return (
             <article key={officer.id} className="surface-card p-5">
-              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+              <div className="grid grid-cols-[minmax(0,1fr)] items-start gap-3">
                 <div className="min-w-0">
                   <h3 className="truncate text-base font-semibold">{officer.full_name}</h3>
                   <p className="truncate text-xs text-muted-foreground">
-                    {officer.employee_code} · {department?.name ?? "Unassigned"} ·{" "}
+                    {officer.employee_code ?? "Employee code not provided"} · {department?.name ?? "Unassigned"} ·{" "}
                     {district?.name ?? "City-wide"}
                   </p>
                 </div>
-                <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-warning/15 px-2 py-1 text-xs font-semibold text-warning">
-                  <Star className="size-3.5" /> {Number(officer.rating).toFixed(1)}
-                </span>
               </div>
 
               <dl className="mt-4 grid grid-cols-3 gap-3 text-center">
@@ -95,15 +94,6 @@ function OfficersPage() {
         })}
       </div>
 
-      <section className="surface-card space-y-2 border-dashed p-6">
-        <p className="inline-flex items-center gap-2 text-sm font-semibold">
-          <Sparkles className="size-4 text-accent-foreground" /> AI workload balancing (reserved)
-        </p>
-        <p className="text-xs text-muted-foreground">
-          The routing model will weigh skill, district proximity and current load before assigning
-          each complaint to an officer.
-        </p>
-      </section>
     </>
   );
 }

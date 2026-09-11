@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import type { AiUnderstanding } from "@/lib/ai/types";
 
 /** Columns readable without elevated privileges (reporter contact withheld). */
 const COMPLAINT_COLUMNS =
@@ -126,11 +127,28 @@ export const aiCheckDuplicate = createServerFn({ method: "POST" })
 /** Modules 1 + 3 + 4 — full intake triage for a saved complaint. */
 export const aiTriageComplaint = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => z.object({ complaintId: z.string().uuid() }).parse(input))
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        complaintId: z.string().uuid(),
+        understanding: z
+          .object({
+            infrastructureType: z.string(),
+            category: z.string(),
+            severity: z.enum(["low", "medium", "high", "critical"]),
+            suggestedDepartmentCode: z.string(),
+            summary: z.string(),
+            confidence: z.number(),
+          })
+          .optional(),
+      })
+      .parse(input),
+  )
   .handler(async ({ data, context }) => {
     const { understandComplaint, computePriority, routeComplaint } = await import(
       "@/lib/ai/modules.server"
     );
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const supabase = context.supabase;
 
     const { data: complaint, error } = await supabase
@@ -152,18 +170,22 @@ export const aiTriageComplaint = createServerFn({ method: "POST" })
         supabase.from("districts").select("id, name, center_lat, center_lng"),
         supabase
           .from("officers")
-          .select("id, full_name, department_id, district_id, active_count, avg_resolution_hours, rating"),
+          .select(
+            "id, profile_id, full_name, department_id, district_id, active_count, avg_resolution_hours, rating",
+          ),
       ]);
 
     const districtName = (districts ?? []).find((d) => d.id === complaint.district_id)?.name;
 
-    const understanding = await understandComplaint({
-      title: complaint.title,
-      description: complaint.description,
-      address: complaint.address,
-      ...(districtName ? { district: districtName } : {}),
-      imageUrl: images?.[0]?.image_url ?? null,
-    });
+    const understanding: AiUnderstanding =
+      data.understanding ??
+      (await understandComplaint({
+        title: complaint.title,
+        description: complaint.description,
+        address: complaint.address,
+        ...(districtName ? { district: districtName } : {}),
+        imageUrl: images?.[0]?.image_url ?? null,
+      }));
 
     const hoursPending = (Date.now() - new Date(complaint.created_at).getTime()) / 3_600_000;
     const priority = await computePriority({
@@ -213,6 +235,28 @@ export const aiTriageComplaint = createServerFn({ method: "POST" })
       changed_by: context.userId,
       changed_by_name: "CivicAI",
     });
+
+    if (routing.officerId) {
+      const assignedOfficer = (officers ?? []).find((row) => row.id === routing.officerId);
+      if (assignedOfficer?.profile_id) {
+        const { data: existingNotifications } = await supabaseAdmin
+          .from("notifications")
+          .select("id")
+          .eq("user_id", assignedOfficer.profile_id)
+          .eq("complaint_id", complaint.id)
+          .eq("title", "Complaint assigned")
+          .limit(1);
+
+        if (!(existingNotifications ?? []).length) {
+          await supabaseAdmin.from("notifications").insert({
+            user_id: assignedOfficer.profile_id,
+            title: "Complaint assigned",
+            message: `${complaint.title} has been assigned to ${routing.officerName}.`,
+            complaint_id: complaint.id,
+          });
+        }
+      }
+    }
 
     return { understanding, priority, routing };
   });
@@ -268,7 +312,7 @@ export const aiVerifyRepair = createServerFn({ method: "POST" })
     const [{ data: complaint }, { data: images }] = await Promise.all([
       supabase
         .from("complaints")
-        .select("title, description, category")
+        .select("title, description, category, officer_id")
         .eq("id", data.complaintId)
         .maybeSingle(),
       supabase
@@ -283,6 +327,10 @@ export const aiVerifyRepair = createServerFn({ method: "POST" })
     if (!complaint) throw new Error("Complaint not found");
     const before = images?.[0]?.image_url;
     if (!before) {
+      await supabase
+        .from("complaints")
+        .update({ repair_verification_status: "needs_reinspection" })
+        .eq("id", data.complaintId);
       return {
         verdict: "needs_reinspection" as const,
         confidence: 0.3,
@@ -291,7 +339,7 @@ export const aiVerifyRepair = createServerFn({ method: "POST" })
       };
     }
 
-    return verifyRepair({
+    const result = await verifyRepair({
       title: complaint.title,
       description: complaint.description,
       category: complaint.category,
@@ -299,6 +347,44 @@ export const aiVerifyRepair = createServerFn({ method: "POST" })
       beforeImageUrl: before,
       afterImageUrl: data.afterImageUrl,
     });
+
+    await supabase
+      .from("complaints")
+      .update({
+        repair_verification_status:
+          result.verdict === "repair_completed" ? "verified" : "needs_reinspection",
+      })
+      .eq("id", data.complaintId);
+
+    if (result.verdict === "needs_reinspection" && complaint.officer_id) {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { data: officer } = await supabase
+        .from("officers")
+        .select("profile_id")
+        .eq("id", complaint.officer_id)
+        .maybeSingle();
+
+      if (officer?.profile_id) {
+        const { data: existingNotifications } = await supabaseAdmin
+          .from("notifications")
+          .select("id")
+          .eq("user_id", officer.profile_id)
+          .eq("complaint_id", data.complaintId)
+          .eq("title", "Repair needs reinspection")
+          .limit(1);
+
+        if (!(existingNotifications ?? []).length) {
+          await supabaseAdmin.from("notifications").insert({
+            user_id: officer.profile_id,
+            title: "Repair needs reinspection",
+            message: `The repair for ${complaint.title} needs another inspection before completion.`,
+            complaint_id: data.complaintId,
+          });
+        }
+      }
+    }
+
+    return result;
   });
 
 /** Module 6 — predictive preventive-maintenance insights. */
@@ -308,6 +394,13 @@ export const aiPredictiveInsights = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { generateInsights } = await import("@/lib/ai/modules.server");
     const supabase = context.supabase;
+
+    const { data: roles } = await supabase.from("user_roles").select("role").eq("user_id", context.userId);
+    const isAdmin = (roles ?? []).some((row) => row.role === "department_admin");
+
+    if (!isAdmin) {
+      throw new Error("Not permitted to generate predictive insights.");
+    }
 
     const since = new Date(Date.now() - data.months * 30 * 86_400_000).toISOString();
     const [{ data: complaints }, { data: districts }] = await Promise.all([

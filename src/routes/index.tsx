@@ -1,6 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import {
-  ArrowRight,
   BarChart3,
   Camera,
   MapPinned,
@@ -75,12 +74,12 @@ function Landing() {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button asChild variant="ghost" size="sm">
-              <Link to="/auth" search={{ mode: "signin" }}>
+              <Link to="/auth">
                 Sign in
               </Link>
             </Button>
             <Button asChild size="sm">
-              <Link to="/auth" search={{ mode: "signup" }}>
+              <Link to="/auth">
                 Get started
               </Link>
             </Button>
@@ -102,26 +101,9 @@ function Landing() {
               CivicAI unifies citizen reporting, department oversight and field execution — with a
               verified five-stage resolution trail on every single issue.
             </p>
-            <div className="mt-8 flex flex-wrap gap-3">
-              <Button asChild size="lg">
-                <Link to="/auth" search={{ mode: "signup" }}>
-                  Report an issue <ArrowRight className="ml-2 size-4" />
-                </Link>
-              </Button>
-              <Button
-                asChild
-                size="lg"
-                variant="outline"
-                className="border-sidebar-border bg-sidebar-accent/40 text-sidebar-foreground hover:bg-sidebar-accent/70"
-              >
-                <Link to="/auth" search={{ mode: "signin" }}>
-                  Department login
-                </Link>
-              </Button>
-            </div>
             <dl className="mt-10 grid max-w-lg grid-cols-3 gap-4">
               {[
-                ["5", "districts monitored"],
+                ["3", "districts monitored"],
                 ["5", "departments live"],
                 ["24/7", "citizen intake"],
               ].map(([value, label]) => (
@@ -190,7 +172,7 @@ function Landing() {
             </p>
           </div>
           <Button asChild size="lg">
-            <Link to="/auth" search={{ mode: "signup" }}>
+            <Link to="/auth">
               <MapPinned className="mr-2 size-4" /> Open the platform
             </Link>
           </Button>

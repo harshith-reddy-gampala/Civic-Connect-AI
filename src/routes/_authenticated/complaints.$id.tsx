@@ -122,7 +122,7 @@ function ComplaintDetail() {
               </div>
             </dl>
 
-            {complaint.citizen_id !== me?.profile?.id ? (
+            {me?.role !== "field_officer" && complaint.citizen_id !== me?.profile?.id ? (
               <Button
                 className="mt-6"
                 variant={supported ? "secondary" : "default"}
@@ -156,12 +156,14 @@ function ComplaintDetail() {
             </section>
           ) : null}
 
-          <section className="surface-card p-6">
-            <h2 className="text-sm font-semibold">Status history</h2>
-            <div className="mt-5">
-              <Timeline history={data.history} />
-            </div>
-          </section>
+          {me?.role !== "field_officer" ? (
+            <section className="surface-card p-6">
+              <h2 className="text-sm font-semibold">Status history</h2>
+              <div className="mt-5">
+                <Timeline history={data.history} />
+              </div>
+            </section>
+          ) : null}
         </div>
 
         <div className="space-y-6">

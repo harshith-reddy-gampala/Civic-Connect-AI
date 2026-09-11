@@ -1,10 +1,18 @@
-import { useMemo, useState } from "react";
-import { MapPin } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { MapPin, Minus, Plus } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { PRIORITY_META, type ComplaintPriority } from "@/lib/civic";
 
 const TILE = 256;
+const MIN_ZOOM = 8;
+const MAX_ZOOM = 18;
+const DEFAULT_ZOOM = 13;
+const MAP_PADDING = 32;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
 
 function project(lat: number, lng: number, zoom: number) {
   const scale = TILE * 2 ** zoom;
@@ -12,6 +20,49 @@ function project(lat: number, lng: number, zoom: number) {
   const sin = Math.sin((lat * Math.PI) / 180);
   const y = (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * scale;
   return { x, y };
+}
+
+function unproject(x: number, y: number, zoom: number) {
+  const scale = TILE * 2 ** zoom;
+  const lng = (x / scale) * 360 - 180;
+  const lat =
+    ((2 * Math.atan(Math.exp(Math.PI * (1 - (2 * y) / scale))) - Math.PI / 2) * 180) / Math.PI;
+
+  return { lat, lng };
+}
+
+function getMarkerFit(markers: MapMarker[], viewportWidth: number, viewportHeight: number) {
+  if (markers.length === 0) {
+    return null;
+  }
+
+  const minLat = Math.min(...markers.map((marker) => marker.lat));
+  const maxLat = Math.max(...markers.map((marker) => marker.lat));
+  const minLng = Math.min(...markers.map((marker) => marker.lng));
+  const maxLng = Math.max(...markers.map((marker) => marker.lng));
+
+  const projectedAtDefault = markers.map((marker) => project(marker.lat, marker.lng, DEFAULT_ZOOM));
+  const minX = Math.min(...projectedAtDefault.map((point) => point.x));
+  const maxX = Math.max(...projectedAtDefault.map((point) => point.x));
+  const minY = Math.min(...projectedAtDefault.map((point) => point.y));
+  const maxY = Math.max(...projectedAtDefault.map((point) => point.y));
+
+  const spanX = Math.max(maxX - minX, 1);
+  const spanY = Math.max(maxY - minY, 1);
+  const fitRatio = Math.min(
+    (viewportWidth - MAP_PADDING * 2) / (spanX * 1.1),
+    (viewportHeight - MAP_PADDING * 2) / (spanY * 1.1),
+  );
+
+  const zoom = clamp(DEFAULT_ZOOM + Math.log2(Math.max(fitRatio, 0.2)), MIN_ZOOM, MAX_ZOOM);
+
+  return {
+    center: {
+      lat: (minLat + maxLat) / 2,
+      lng: (minLng + maxLng) / 2,
+    },
+    zoom,
+  };
 }
 
 export type MapMarker = {
@@ -32,13 +83,13 @@ const markerTone: Record<ComplaintPriority, string> = {
 
 /**
  * Lightweight OpenStreetMap tile viewer — no external map SDK, so it renders
- * instantly inside dashboards. Markers are absolutely positioned from the
- * projected pixel offset of the map centre.
+ * instantly inside dashboards. Markers are positioned from stored complaint
+ * coordinates and the map auto-fits the district marker set for the officer view.
  */
 export function MapPanel({
   center,
   markers,
-  zoom = 13,
+  zoom = DEFAULT_ZOOM,
   height = "h-[380px]",
   className,
 }: {
@@ -49,7 +100,47 @@ export function MapPanel({
   className?: string;
 }) {
   const [active, setActive] = useState<string | null>(null);
-  const centerPx = useMemo(() => project(center.lat, center.lng, zoom), [center, zoom]);
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const [view, setView] = useState({ center, zoom });
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    originCenter: { lat: number; lng: number };
+  } | null>(null);
+
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+
+    const updateSize = () => {
+      setViewport({
+        width: node.clientWidth || 0,
+        height: node.clientHeight || 0,
+      });
+    };
+
+    updateSize();
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(node);
+
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!markers.length) {
+      setView({ center, zoom });
+      return;
+    }
+
+    const nextFit = getMarkerFit(markers, viewport.width || 900, viewport.height || 440);
+    if (nextFit) {
+      setView(nextFit);
+    }
+  }, [center, markers, viewport.height, viewport.width, zoom]);
+
+  const centerPx = useMemo(() => project(view.center.lat, view.center.lng, view.zoom), [view.center, view.zoom]);
 
   const tiles = useMemo(() => {
     const centerTileX = Math.floor(centerPx.x / TILE);
@@ -59,26 +150,72 @@ export function MapPanel({
       for (let dy = -2; dy <= 2; dy++) {
         const tx = centerTileX + dx;
         const ty = centerTileY + dy;
-        if (ty < 0 || ty >= 2 ** zoom) continue;
-        const wrapped = ((tx % 2 ** zoom) + 2 ** zoom) % 2 ** zoom;
+        if (ty < 0 || ty >= 2 ** view.zoom) continue;
+        const wrapped = ((tx % 2 ** view.zoom) + 2 ** view.zoom) % 2 ** view.zoom;
         out.push({
           key: `${tx}-${ty}`,
-          url: `https://tile.openstreetmap.org/${zoom}/${wrapped}/${ty}.png`,
+          url: `https://tile.openstreetmap.org/${view.zoom}/${wrapped}/${ty}.png`,
           left: tx * TILE - centerPx.x,
           top: ty * TILE - centerPx.y,
         });
       }
     }
     return out;
-  }, [centerPx, zoom]);
+  }, [centerPx, view.zoom]);
+
+  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setView((current) => ({
+      ...current,
+      zoom: clamp(current.zoom + (event.deltaY < 0 ? 1 : -1), MIN_ZOOM, MAX_ZOOM),
+    }));
+  };
+
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    dragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originCenter: view.center,
+    };
+  };
+
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+
+    const dx = event.clientX - dragRef.current.startX;
+    const dy = event.clientY - dragRef.current.startY;
+    const originPx = project(dragRef.current.originCenter.lat, dragRef.current.originCenter.lng, view.zoom);
+    const nextPx = { x: originPx.x - dx, y: originPx.y - dy };
+    const nextCenter = unproject(nextPx.x, nextPx.y, view.zoom);
+
+    setView((current) => ({
+      ...current,
+      center: nextCenter,
+    }));
+  };
+
+  const handlePointerEnd = () => {
+    dragRef.current = null;
+  };
 
   return (
     <div
+      ref={containerRef}
       className={cn(
         "surface-card relative overflow-hidden bg-muted p-0",
         height,
         className,
       )}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerEnd}
+      onPointerLeave={handlePointerEnd}
+      onWheel={handleWheel}
+      style={{ touchAction: "none" }}
     >
       <div className="absolute inset-0">
         {tiles.map((tile) => (
@@ -95,7 +232,7 @@ export function MapPanel({
         ))}
 
         {markers.map((marker) => {
-          const px = project(marker.lat, marker.lng, zoom);
+          const px = project(marker.lat, marker.lng, view.zoom);
           return (
             <button
               key={marker.id}
@@ -129,6 +266,25 @@ export function MapPanel({
             </button>
           );
         })}
+      </div>
+
+      <div className="absolute top-3 right-3 z-10 flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => setView((current) => ({ ...current, zoom: clamp(current.zoom + 1, MIN_ZOOM, MAX_ZOOM) }))}
+          aria-label="Zoom in"
+          className="grid size-9 place-items-center rounded-md border border-border bg-card/90 text-muted-foreground shadow-sm hover:bg-card"
+        >
+          <Plus className="size-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => setView((current) => ({ ...current, zoom: clamp(current.zoom - 1, MIN_ZOOM, MAX_ZOOM) }))}
+          aria-label="Zoom out"
+          className="grid size-9 place-items-center rounded-md border border-border bg-card/90 text-muted-foreground shadow-sm hover:bg-card"
+        >
+          <Minus className="size-4" />
+        </button>
       </div>
 
       <div className="pointer-events-none absolute right-3 bottom-2 rounded-md bg-card/85 px-2 py-1 text-[10px] text-muted-foreground">

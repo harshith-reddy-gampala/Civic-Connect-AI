@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 
 import { supabase } from "@/integrations/supabase/client";
 import type { ComplaintStatus } from "@/lib/civic";
 import { STALE_TIME } from "@/lib/constants";
 import type { Tables } from "@/integrations/supabase/types";
+import { notifyComplaintCitizen } from "@/lib/notifications.functions";
 
 export type District = Tables<"districts">;
 export type Department = Tables<"departments">;
@@ -68,7 +70,12 @@ export function useOfficers() {
  * Complaint list. `limit` caps the payload for dashboard widgets; full list
  * views paginate client-side from the cached window.
  */
-export function useComplaints(filters?: { citizenId?: string; officerId?: string; limit?: number }) {
+export function useComplaints(filters?: {
+  citizenId?: string;
+  officerId?: string;
+  districtId?: string;
+  limit?: number;
+}) {
   return useQuery({
     queryKey: ["complaints", filters ?? null],
     staleTime: STALE_TIME.list,
@@ -76,6 +83,7 @@ export function useComplaints(filters?: { citizenId?: string; officerId?: string
       let query = supabase.from("complaints").select(COMPLAINT_COLUMNS).order("created_at", { ascending: false });
       if (filters?.citizenId) query = query.eq("citizen_id", filters.citizenId);
       if (filters?.officerId) query = query.eq("officer_id", filters.officerId);
+      if (filters?.districtId) query = query.eq("district_id", filters.districtId);
       if (filters?.limit) query = query.limit(filters.limit);
       const { data, error } = await query;
       if (error) throw error;
@@ -197,19 +205,38 @@ export function useMarkNotificationRead() {
 
 export function useUpdateComplaintStatus(actor: { id?: string | undefined; name: string }) {
   const qc = useQueryClient();
+  const notifyCitizen = useServerFn(notifyComplaintCitizen);
+
   return useMutation({
     mutationFn: async (input: {
       complaintId: string;
       status: ComplaintStatus;
       remarks?: string | undefined;
       afterImageUrl?: string | null;
+      repairVerificationStatus?: "verified" | "needs_reinspection" | null;
       citizenId?: string | null;
     }) => {
+      if (input.status === "completed" && (!input.afterImageUrl || input.repairVerificationStatus !== "verified")) {
+        throw new Error("Completion requires verified repair evidence.");
+      }
+
+      if (input.afterImageUrl) {
+        const { error } = await supabase.from("complaint_images").insert({
+          complaint_id: input.complaintId,
+          image_url: input.afterImageUrl,
+          kind: "after",
+          uploaded_by: actor.id ?? null,
+        });
+        if (error) throw error;
+      }
+
       const { error } = await supabase
         .from("complaints")
         .update({
           status: input.status,
           remarks: input.remarks ?? null,
+          repair_verification_status:
+            input.status === "completed" ? "verified" : null,
           resolved_at: input.status === "completed" ? new Date().toISOString() : null,
         })
         .eq("id", input.complaintId);
@@ -223,21 +250,13 @@ export function useUpdateComplaintStatus(actor: { id?: string | undefined; name:
         changed_by_name: actor.name,
       });
 
-      if (input.afterImageUrl) {
-        await supabase.from("complaint_images").insert({
-          complaint_id: input.complaintId,
-          image_url: input.afterImageUrl,
-          kind: "after",
-          uploaded_by: actor.id ?? null,
-        });
-      }
-
-      if (input.citizenId) {
-        await supabase.from("notifications").insert({
-          user_id: input.citizenId,
-          title: `Status updated: ${input.status.replace(/_/g, " ")}`,
-          message: input.remarks || "Your report has a new update from the field team.",
-          complaint_id: input.complaintId,
+      if (input.citizenId && (input.status === "in_progress" || input.status === "completed")) {
+        await notifyCitizen({
+          data: {
+            complaintId: input.complaintId,
+            title: `Status updated: ${input.status.replace(/_/g, " ")}`,
+            message: input.remarks || "Your report has a new update from the field team.",
+          },
         });
       }
     },
@@ -319,13 +338,6 @@ export function useCreateComplaint(citizenId?: string) {
           });
         }
       }
-
-      await supabase.from("notifications").insert({
-        user_id: citizenId,
-        title: "Report received",
-        message: `${input.title} is now in the queue for review.`,
-        complaint_id: data.id,
-      });
 
       return data.id;
     },

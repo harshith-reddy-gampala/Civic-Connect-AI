@@ -1,21 +1,17 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { CategoryChart, ChartFrame, StatusPie, TrendChart } from "@/components/civic/LazyCharts";
 import { PageHeader } from "@/components/civic/PageHeader";
 import { StatCard } from "@/components/civic/StatCard";
 import { ChartSkeleton, StatGridSkeleton, TableSkeleton } from "@/components/civic/skeletons";
 import { Building2, Layers, ThumbsUp, Timer } from "lucide-react";
-import {
-  categoryBreakdown,
-  districtBreakdown,
-  monthlyTrend,
-  statusBreakdown,
-  summarize,
-} from "@/lib/analytics";
+import { districtBreakdown, summarize } from "@/lib/analytics";
 import { formatHours } from "@/lib/civic";
 import { useComplaints, useDistricts } from "@/lib/queries";
 
 export const Route = createFileRoute("/_authenticated/analytics")({
+  beforeLoad: ({ context }) => {
+    if (context.role !== "department_admin") throw redirect({ to: "/dashboard" });
+  },
   head: () => ({
     meta: [
       { title: "District analytics — CivicAI" },
@@ -38,6 +34,12 @@ function AnalyticsPage() {
   const rows = complaints.data ?? [];
   const summary = summarize(rows);
   const districtRows = districtBreakdown(rows, districts.data ?? []);
+  const bestResolutionDistrict = districtRows
+    .filter((district) => district.avgResolution > 0)
+    .sort((a, b) => a.avgResolution - b.avgResolution)[0];
+  const mostCriticalDistrict = districtRows
+    .slice()
+    .sort((a, b) => b.critical - a.critical)[0];
 
   if (complaints.isLoading)
     return (
@@ -71,21 +73,28 @@ function AnalyticsPage() {
         <StatCard label="Citizen supports" value={summary.supporters} icon={ThumbsUp} tone="success" />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
-        <ChartFrame title="Reporting trend" subtitle="Monthly reports vs resolutions">
-          <TrendChart data={monthlyTrend(rows)} />
-        </ChartFrame>
-        <ChartFrame title="Stage mix" subtitle="Backlog distribution across stages">
-          <StatusPie data={statusBreakdown(rows)} />
-        </ChartFrame>
-      </div>
-
-      <ChartFrame title="Category volume" subtitle="Which infrastructure fails most often">
-        <CategoryChart data={categoryBreakdown(rows)} />
-      </ChartFrame>
-
       <section className="surface-card p-5">
-        <h3 className="text-sm font-semibold">District scorecard</h3>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold">District scorecard</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Live comparison across monitored districts using the current complaint dataset.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+            {bestResolutionDistrict ? (
+              <span className="rounded-full bg-muted px-2 py-1">
+                Fastest avg resolution: {bestResolutionDistrict.name}
+              </span>
+            ) : null}
+            {mostCriticalDistrict ? (
+              <span className="rounded-full bg-muted px-2 py-1">
+                Highest critical load: {mostCriticalDistrict.name}
+              </span>
+            ) : null}
+          </div>
+        </div>
+
         <div className="mt-4 overflow-x-auto">
           <table className="w-full min-w-[640px] text-sm">
             <thead>

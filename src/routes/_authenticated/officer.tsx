@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import {
   CheckCircle2,
   ClipboardList,
@@ -12,7 +12,6 @@ import { toast } from "sonner";
 
 import { PriorityBadge, StatusBadge } from "@/components/civic/badges";
 import { AiErrorState, AiSection, AiThinking, ConfidenceMeter } from "@/components/civic/ai";
-import { MapPanel } from "@/components/civic/MapPanel";
 import { PageHeader } from "@/components/civic/PageHeader";
 import { StatCard } from "@/components/civic/StatCard";
 import { Button } from "@/components/ui/button";
@@ -39,6 +38,9 @@ import {
 
 
 export const Route = createFileRoute("/_authenticated/officer")({
+  beforeLoad: ({ context }) => {
+    if (context.role !== "field_officer") throw redirect({ to: "/dashboard" });
+  },
   head: () => ({
     meta: [
       { title: "Field officer queue — CivicAI" },
@@ -90,10 +92,25 @@ function OfficerQueue() {
 
 
   const rows = complaints.data ?? [];
-  const open = rows.filter((row) => row.status !== "completed");
+  const severityOrder = { critical: 4, high: 3, medium: 2, low: 1 } as const;
+  const open = [...rows]
+    .filter((row) => row.status !== "completed")
+    .sort((a, b) => {
+      const severityDelta =
+        (severityOrder[b.priority ?? "low"] ?? 0) - (severityOrder[a.priority ?? "low"] ?? 0);
+      if (severityDelta !== 0) return severityDelta;
+
+      const aiDelta = Number(b.ai_priority_score ?? 0) - Number(a.ai_priority_score ?? 0);
+      if (aiDelta !== 0) return aiDelta;
+
+      return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+    });
   const done = rows.filter((row) => row.status === "completed");
   const active = rows.find((row) => row.id === activeId) ?? null;
   const options = active ? nextStatuses(active.status) : [];
+  const completionVerificationReady =
+    status !== "completed" ||
+    (!!proofData && verification.data?.verdict === "repair_completed" && !verification.isPending);
 
   async function submit() {
     if (!active || !status) {
@@ -102,28 +119,29 @@ function OfficerQueue() {
     }
     setUploading(true);
     try {
-      // Module 5: verify the repair before closing, if proof is attached.
-      let aiNote = "";
-      if (status === "completed" && proofData) {
-        try {
-          const result =
-            verification.data ??
-            (await verification.mutateAsync({
-              complaintId: active.id,
-              afterImageUrl: proofData,
-              remarks: remarks.trim(),
-            }));
-          aiNote = ` [AI verification: ${
-            result.verdict === "repair_completed" ? "repair completed" : "needs reinspection"
-          } · ${Math.round(result.confidence * 100)}% confidence]`;
-        } catch {
-          aiNote = "";
+      if (status === "completed") {
+        if (!proofData) {
+          throw new Error("Attach an after-repair photo and run AI repair verification before completing this issue.");
         }
+        if (verification.isPending) {
+          throw new Error("Repair verification is still running. Wait for it to finish before saving.");
+        }
+        if (verification.isError || verification.data?.verdict !== "repair_completed") {
+          throw new Error("Repair must be reinspected before it can be marked completed.");
+        }
+      }
+
+      let aiNote = "";
+      if (status === "completed" && verification.data) {
+        aiNote = ` [AI verification: repair completed · ${Math.round(verification.data.confidence * 100)}% confidence]`;
       }
 
       let afterImageUrl: string | null = null;
       if (proof && me?.profile?.id) {
         afterImageUrl = await uploadComplaintImage(proof, me.profile.id);
+      }
+      if (status === "completed" && !afterImageUrl) {
+        throw new Error("The after-repair photo could not be uploaded.");
       }
       const finalRemarks = `${remarks.trim()}${aiNote}`.trim().slice(0, 500);
       await update.mutateAsync({
@@ -131,6 +149,7 @@ function OfficerQueue() {
         status,
         remarks: finalRemarks || undefined,
         afterImageUrl,
+        repairVerificationStatus: status === "completed" ? "verified" : null,
         citizenId: active.citizen_id,
       });
       setActiveId(null);
@@ -226,7 +245,17 @@ function OfficerQueue() {
                       <Label>Next stage</Label>
                       <Select
                         value={status}
-                        onValueChange={(value) => setStatus(value as ComplaintStatus)}
+                        onValueChange={(value) => {
+                          const nextStatus = value as ComplaintStatus;
+                          setStatus(nextStatus);
+
+                          if (nextStatus !== "completed") {
+                            setRemarks("");
+                            setProof(null);
+                            setProofData(null);
+                            verification.reset();
+                          }
+                        }}
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Select stage" />
@@ -241,114 +270,126 @@ function OfficerQueue() {
                       </Select>
                     </div>
 
-                    <div className="space-y-2">
-                      <Label htmlFor={`remarks-${complaint.id}`}>Field remarks</Label>
-                      <Textarea
-                        id={`remarks-${complaint.id}`}
-                        rows={3}
-                        value={remarks}
-                        maxLength={LIMITS.remarksMax}
-                        onChange={(event) => setRemarks(event.target.value)}
-                        placeholder="What was done on site?"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor={`proof-${complaint.id}`}>Repair proof photo</Label>
-                      <label
-                        htmlFor={`proof-${complaint.id}`}
-                        className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
-                      >
-                        <Upload className="size-4" />
-                        {proof ? proof.name : "Attach after-repair photo"}
-                      </label>
-                      <input
-                        id={`proof-${complaint.id}`}
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={async (event) => {
-                          const selected = event.target.files?.[0] ?? null;
-                          setProof(selected);
-                          setProofData(null);
-                          verification.reset();
-                          if (selected) {
-                            try {
-                              setProofData(await fileToDataUrl(selected));
-                            } catch {
-                              toast.error("Could not prepare that photo for AI verification");
-                            }
-                          }
-                        }}
-                      />
-                    </div>
-
-                    <AiSection
-                      title="AI repair verification"
-                      hint="Compares the citizen's original photo with your proof photo."
-                      action={
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => runVerification(complaint.id)}
-                          disabled={verification.isPending || !proofData}
-                        >
-                          <ShieldCheck className="mr-2 size-3.5" /> Verify
-                        </Button>
-                      }
-                    >
-                      {verification.isPending ? (
-                        <AiThinking label="Comparing before and after photos…" />
-                      ) : null}
-
-                      {verification.isError && !verification.isPending ? (
-                        <AiErrorState
-                          message={
-                            verification.error instanceof Error
-                              ? verification.error.message
-                              : "Verification failed."
-                          }
-                          onRetry={() => runVerification(complaint.id)}
-                          pending={verification.isPending}
-                        />
-                      ) : null}
-
-                      {verification.data && !verification.isPending ? (
-                        <div className="space-y-3">
-                          <p
-                            className={
-                              verification.data.verdict === "repair_completed"
-                                ? "inline-flex items-center gap-2 text-sm font-semibold text-success"
-                                : "inline-flex items-center gap-2 text-sm font-semibold text-warning"
-                            }
-                          >
-                            <ShieldCheck className="size-4" />
-                            {verification.data.verdict === "repair_completed"
-                              ? "Repair completed"
-                              : "Needs reinspection"}
-                          </p>
-                          <ConfidenceMeter value={verification.data.confidence} />
-                          <p className="text-xs text-muted-foreground">{verification.data.notes}</p>
-                          {verification.data.observations.length ? (
-                            <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
-                              {verification.data.observations.map((item) => (
-                                <li key={item}>{item}</li>
-                              ))}
-                            </ul>
-                          ) : null}
+                    {status === "completed" ? (
+                      <>
+                        <div className="space-y-2">
+                          <Label htmlFor={`remarks-${complaint.id}`}>Field remarks</Label>
+                          <Textarea
+                            id={`remarks-${complaint.id}`}
+                            rows={3}
+                            value={remarks}
+                            maxLength={LIMITS.remarksMax}
+                            onChange={(event) => setRemarks(event.target.value)}
+                            placeholder="What was done on site?"
+                          />
                         </div>
-                      ) : null}
 
-                      {!verification.data && !verification.isPending && !verification.isError ? (
-                        <p className="text-xs text-muted-foreground">
-                          Attach the after-repair photo; verification also runs automatically when you
-                          close the issue as completed.
-                        </p>
-                      ) : null}
-                    </AiSection>
+                        <div className="space-y-2">
+                          <Label htmlFor={`proof-${complaint.id}`}>Repair proof photo</Label>
+                          <label
+                            htmlFor={`proof-${complaint.id}`}
+                            className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-border px-4 py-3 text-sm text-muted-foreground"
+                          >
+                            <Upload className="size-4" />
+                            {proof ? proof.name : "Attach after-repair photo"}
+                          </label>
+                          <input
+                            id={`proof-${complaint.id}`}
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={async (event) => {
+                              const selected = event.target.files?.[0] ?? null;
+                              setProof(selected);
+                              setProofData(null);
+                              verification.reset();
+                              if (selected) {
+                                try {
+                                  setProofData(await fileToDataUrl(selected));
+                                } catch {
+                                  toast.error("Could not prepare that photo for AI verification");
+                                }
+                              }
+                            }}
+                          />
+                        </div>
 
+                        <AiSection
+                          title="AI repair verification"
+                          hint="Compares the citizen's original photo with your proof photo."
+                          action={
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => runVerification(complaint.id)}
+                              disabled={verification.isPending || !proofData}
+                            >
+                              <ShieldCheck className="mr-2 size-3.5" /> Verify
+                            </Button>
+                          }
+                        >
+                          {verification.isPending ? (
+                            <AiThinking label="Comparing before and after photos…" />
+                          ) : null}
 
-                    <Button onClick={submit} disabled={uploading || update.isPending}>
+                          {verification.isError && !verification.isPending ? (
+                            <AiErrorState
+                              message={
+                                verification.error instanceof Error
+                                  ? verification.error.message
+                                  : "Verification failed."
+                              }
+                              onRetry={() => runVerification(complaint.id)}
+                              pending={verification.isPending}
+                            />
+                          ) : null}
+
+                          {verification.data && !verification.isPending ? (
+                            <div className="space-y-3">
+                              <p
+                                className={
+                                  verification.data.verdict === "repair_completed"
+                                    ? "inline-flex items-center gap-2 text-sm font-semibold text-success"
+                                    : "inline-flex items-center gap-2 text-sm font-semibold text-warning"
+                                }
+                              >
+                                <ShieldCheck className="size-4" />
+                                {verification.data.verdict === "repair_completed"
+                                  ? "Repair completed"
+                                  : "Needs reinspection"}
+                              </p>
+                              <ConfidenceMeter value={verification.data.confidence} />
+                              <p className="text-xs text-muted-foreground">{verification.data.notes}</p>
+                              {verification.data.observations.length ? (
+                                <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
+                                  {verification.data.observations.map((item) => (
+                                    <li key={item}>{item}</li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          {!verification.data && !verification.isPending && !verification.isError ? (
+                            <p className="text-xs text-muted-foreground">
+                              Attach the after-repair photo and run AI repair verification before completing the issue.
+                            </p>
+                          ) : null}
+                          {status === "completed" && !verification.isPending ? (
+                            <p className="text-xs font-medium text-warning">
+                              {verification.data?.verdict === "repair_completed"
+                                ? "Repair verification passed. You can save this issue as completed."
+                                : "Repair must be reinspected before this issue can be marked completed."}
+                            </p>
+                          ) : null}
+                        </AiSection>
+                      </>
+                    ) : null}
+
+                    <Button
+                      onClick={submit}
+                      disabled={uploading || update.isPending || !completionVerificationReady}
+                    >
                       {uploading || update.isPending ? (
                         <Loader2 className="mr-2 size-4 animate-spin" />
                       ) : null}
@@ -366,25 +407,6 @@ function OfficerQueue() {
         </section>
 
         <div className="space-y-6">
-          <MapPanel
-            center={{
-              lat: open.find((row) => row.lat)?.lat ?? 18.5204,
-              lng: open.find((row) => row.lng)?.lng ?? 73.8567,
-            }}
-            zoom={13}
-            height="h-[320px]"
-            markers={open
-              .filter((row) => row.lat && row.lng)
-              .map((row) => ({
-                id: row.id,
-                lat: row.lat!,
-                lng: row.lng!,
-                label: row.title,
-                priority: row.priority,
-                meta: row.address,
-              }))}
-          />
-
           <section className="surface-card p-5">
             <h3 className="text-sm font-semibold">Recently completed</h3>
             <ul className="mt-3 divide-y divide-border">

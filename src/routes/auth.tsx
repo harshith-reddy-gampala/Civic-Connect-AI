@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
-import { createFileRoute, useNavigate, useSearch } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
+import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
-import { Loader2, ShieldCheck } from "lucide-react";
+import { ArrowLeft, BriefcaseBusiness, HardHat, Loader2, ShieldCheck, UserRound } from "lucide-react";
 import { toast } from "sonner";
 import { z } from "zod";
 
@@ -9,8 +9,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { supabase } from "@/integrations/supabase/client";
-import { authService } from "@/integrations/auth/index";
-import { ROLE_META, type AppRole } from "@/lib/civic";
 
 const authSearch = z.object({ mode: z.enum(["signin", "signup"]).optional() });
 
@@ -35,12 +33,19 @@ export const Route = createFileRoute("/auth")({
 });
 
 type FormValues = { fullName: string; email: string; password: string; phone: string };
+type AuthRole = "citizen" | "field_officer" | "department_admin";
+
+const ROLE_OPTIONS: { value: AuthRole; label: string; description: string; icon: typeof UserRound }[] = [
+  { value: "citizen", label: "Citizen", description: "Report and track civic issues", icon: UserRound },
+  { value: "field_officer", label: "Field Officer", description: "Manage assigned civic issues", icon: HardHat },
+  { value: "department_admin", label: "Admin", description: "Monitor city-wide operations", icon: BriefcaseBusiness },
+];
 
 function AuthPage() {
   const search = useSearch({ from: "/auth" });
   const navigate = useNavigate();
-  const [mode, setMode] = useState<"signin" | "signup">(search.mode ?? "signin");
-  const [role, setRole] = useState<AppRole>("citizen");
+  const [selectedRole, setSelectedRole] = useState<AuthRole | null>(null);
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [pending, setPending] = useState(false);
   const [confirmSent, setConfirmSent] = useState(false);
 
@@ -48,7 +53,38 @@ function AuthPage() {
     defaultValues: { fullName: "", email: "", password: "", phone: "" },
   });
 
-  const roles = useMemo(() => Object.entries(ROLE_META) as [AppRole, typeof ROLE_META.citizen][], []);
+  useEffect(() => {
+    let active = true;
+
+    const redirectVerifiedUser = async () => {
+      const { data } = await supabase.auth.getSession();
+      if (active && data.session?.user.email_confirmed_at) {
+        navigate({ to: "/citizen", replace: true });
+      }
+    };
+
+    redirectVerifiedUser();
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+      if (
+        active &&
+        (event === "SIGNED_IN" || event === "USER_UPDATED") &&
+        session?.user.email_confirmed_at
+      ) {
+        navigate({ to: "/citizen", replace: true });
+      }
+    });
+
+    return () => {
+      active = false;
+      sub.subscription.unsubscribe();
+    };
+  }, [navigate]);
+
+  function selectRole(role: AuthRole) {
+    setSelectedRole(role);
+    setMode("signin");
+    setConfirmSent(false);
+  }
 
   async function onSubmit(values: FormValues) {
     setPending(true);
@@ -58,8 +94,8 @@ function AuthPage() {
           email: values.email.trim(),
           password: values.password,
           options: {
-            emailRedirectTo: window.location.origin,
-            data: { full_name: values.fullName.trim(), phone: values.phone.trim(), role },
+            emailRedirectTo: `${window.location.origin}/auth?mode=signin`,
+            data: { full_name: values.fullName.trim(), phone: values.phone.trim() },
           },
         });
         if (error) throw error;
@@ -67,7 +103,7 @@ function AuthPage() {
           setConfirmSent(true);
           return;
         }
-        navigate({ to: ROLE_META[role].home });
+        navigate({ to: "/citizen" });
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email: values.email.trim(),
@@ -86,18 +122,6 @@ function AuthPage() {
     } finally {
       setPending(false);
     }
-  }
-
-  async function googleSignIn() {
-    const result = await authService.signInWithOAuth("google", {
-      redirect_uri: window.location.origin,
-    });
-    if (result.error) {
-      toast.error("Google sign-in failed");
-      return;
-    }
-    if (result.redirected) return;
-    navigate({ to: "/dashboard" });
   }
 
   return (
@@ -142,61 +166,85 @@ function AuthPage() {
       <div className="flex items-center justify-center px-4 py-12 sm:px-8">
         <div className="w-full max-w-md">
           <div className="surface-card p-6 sm:p-8">
-            <div className="flex rounded-xl bg-muted p-1">
-              {(["signin", "signup"] as const).map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => {
-                    setMode(option);
-                    setConfirmSent(false);
-                  }}
-                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
-                    mode === option
-                      ? "bg-card text-foreground shadow-card"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {option === "signin" ? "Sign in" : "Create account"}
-                </button>
-              ))}
-            </div>
-
-            {confirmSent ? (
+            {selectedRole === null ? (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h1 className="text-lg font-semibold">Choose your role</h1>
+                    <p className="mt-1 text-sm text-muted-foreground">Select a workspace to continue.</p>
+                  </div>
+                  <Button asChild variant="ghost" size="sm">
+                    <Link to="/">
+                      <ArrowLeft className="mr-1.5 size-4" /> Back
+                    </Link>
+                  </Button>
+                </div>
+                <div className="grid gap-3">
+                  {ROLE_OPTIONS.map((role) => (
+                    <button
+                      key={role.value}
+                      type="button"
+                      onClick={() => selectRole(role.value)}
+                      className="flex items-center gap-3 rounded-xl border border-border p-4 text-left transition-colors hover:border-primary/50 hover:bg-muted/60"
+                    >
+                      <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
+                        <role.icon className="size-5" />
+                      </span>
+                      <span>
+                        <span className="block text-sm font-semibold">{role.label}</span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">{role.description}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : confirmSent ? (
               <div className="mt-6 space-y-3 text-sm">
-                <h2 className="text-lg font-semibold">Confirm your email</h2>
+                <h2 className="text-lg font-semibold">Check your email</h2>
                 <p className="text-muted-foreground">
-                  We sent a confirmation link to your inbox. Click it to activate your CivicAI
-                  workspace, then sign in.
+                  We sent a verification link to your inbox. Click it to verify your email; you will
+                  then be redirected to your citizen dashboard.
                 </p>
                 <Button variant="outline" onClick={() => setMode("signin")} className="w-full">
                   Back to sign in
                 </Button>
               </div>
             ) : (
-              <form onSubmit={handleSubmit(onSubmit)} className="mt-6 space-y-4">
+              <div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="mb-3 -ml-2"
+                  onClick={() => {
+                    setSelectedRole(null);
+                    setConfirmSent(false);
+                  }}
+                >
+                  <ArrowLeft className="mr-1.5 size-4" /> Back to roles
+                </Button>
+                <div className="flex rounded-xl bg-muted p-1">
+                  {(["signin", ...(selectedRole === "citizen" ? ["signup"] : [])] as const).map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => {
+                        setMode(option);
+                        setConfirmSent(false);
+                      }}
+                      className={`flex-1 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
+                        mode === option
+                          ? "bg-card text-foreground shadow-card"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {option === "signin" ? "Sign in" : "Create account"}
+                    </button>
+                  ))}
+                </div>
+                <form onSubmit={handleSubmit(onSubmit)} className="mt-6 space-y-4">
                 {mode === "signup" ? (
                   <>
-                    <div className="space-y-2">
-                      <Label>Choose your workspace</Label>
-                      <div className="grid gap-2">
-                        {roles.map(([value, meta]) => (
-                          <button
-                            key={value}
-                            type="button"
-                            onClick={() => setRole(value)}
-                            className={`rounded-xl border p-3 text-left transition-colors ${
-                              role === value
-                                ? "border-primary bg-primary/5"
-                                : "border-border hover:bg-muted"
-                            }`}
-                          >
-                            <p className="text-sm font-semibold">{meta.label}</p>
-                            <p className="mt-0.5 text-xs text-muted-foreground">{meta.description}</p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
                     <div className="space-y-2">
                       <Label htmlFor="fullName">Full name</Label>
                       <Input
@@ -235,16 +283,8 @@ function AuthPage() {
                   {pending ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
                   {mode === "signup" ? "Create workspace" : "Sign in"}
                 </Button>
-
-                <div className="relative py-1 text-center">
-                  <span className="relative z-10 bg-card px-3 text-xs text-muted-foreground">or</span>
-                  <span className="absolute inset-x-0 top-1/2 h-px bg-border" />
-                </div>
-
-                <Button type="button" variant="outline" className="w-full" onClick={googleSignIn}>
-                  Continue with Google
-                </Button>
-              </form>
+                </form>
+              </div>
             )}
           </div>
           <p className="mt-4 text-center text-xs text-muted-foreground">

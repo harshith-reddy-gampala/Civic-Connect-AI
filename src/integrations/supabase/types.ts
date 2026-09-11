@@ -109,6 +109,7 @@ export type Database = {
           lng: number | null
           officer_id: string | null
           priority: Database["public"]["Enums"]["complaint_priority"]
+          repair_verification_status: string | null
           reference: string
           remarks: string | null
           reporter_name: string
@@ -135,6 +136,7 @@ export type Database = {
           lng?: number | null
           officer_id?: string | null
           priority?: Database["public"]["Enums"]["complaint_priority"]
+          repair_verification_status?: string | null
           reference?: string
           remarks?: string | null
           reporter_name?: string
@@ -161,6 +163,7 @@ export type Database = {
           lng?: number | null
           officer_id?: string | null
           priority?: Database["public"]["Enums"]["complaint_priority"]
+          repair_verification_status?: string | null
           reference?: string
           remarks?: string | null
           reporter_name?: string

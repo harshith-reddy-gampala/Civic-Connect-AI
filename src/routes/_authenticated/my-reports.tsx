@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { FileSearch } from "lucide-react";
 
 import { ComplaintCard } from "@/components/civic/ComplaintCard";
@@ -14,6 +14,9 @@ import { PAGE_SIZE } from "@/lib/constants";
 import { useComplaints } from "@/lib/queries";
 
 export const Route = createFileRoute("/_authenticated/my-reports")({
+  beforeLoad: ({ context }) => {
+    if (context.role !== "citizen") throw redirect({ to: "/dashboard" });
+  },
   head: () => ({
     meta: [
       { title: "My reports — CivicAI" },

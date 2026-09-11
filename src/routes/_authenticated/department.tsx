@@ -1,8 +1,7 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { AlertTriangle, CheckCircle2, Clock, Layers, RefreshCw, Timer } from "lucide-react";
 
-import { CategoryChart, ChartFrame, StatusPie, TrendChart } from "@/components/civic/LazyCharts";
-import { ActivityFeed } from "@/components/civic/ActivityFeed";
+import { ChartFrame, TrendChart } from "@/components/civic/LazyCharts";
 import { EmptyState } from "@/components/civic/EmptyState";
 import {
   ChartSkeleton,
@@ -17,21 +16,28 @@ import { AiErrorState, AiSection, AiThinking } from "@/components/civic/ai";
 import { Button } from "@/components/ui/button";
 import { useAiInsights } from "@/hooks/useAiModules";
 import {
-  categoryBreakdown,
   departmentBreakdown,
   districtBreakdown,
   monthlyTrend,
-  statusBreakdown,
   summarize,
   topCategory,
   resolvedDelta,
   volumeDelta,
 } from "@/lib/analytics";
-import { categoryLabel, formatHours, relativeTime } from "@/lib/civic";
+import {
+  STATUS_FLOW,
+  STATUS_META,
+  categoryLabel,
+  formatHours,
+  relativeTime,
+} from "@/lib/civic";
 import { useComplaints, useDepartments, useDistricts } from "@/lib/queries";
 
 
 export const Route = createFileRoute("/_authenticated/department")({
+  beforeLoad: ({ context }) => {
+    if (context.role !== "department_admin") throw redirect({ to: "/dashboard" });
+  },
   head: () => ({
     meta: [
       { title: "Department command centre — CivicAI" },
@@ -63,6 +69,35 @@ function DepartmentDashboard() {
   const critical = rows
     .filter((c) => c.priority === "critical" && c.status !== "completed")
     .slice(0, 5);
+  const trendData = monthlyTrend(rows);
+  const complaintTotal = rows.length || 1;
+  const stageRows = STATUS_FLOW.map((status) => ({
+    status,
+    label: STATUS_META[status].label,
+    value: rows.filter((complaint) => complaint.status === status).length,
+  }));
+  const categoryRows = [
+    { key: "roads", label: "Roads & Transport", value: rows.filter((complaint) => complaint.category === "roads").length },
+    { key: "water", label: "Water Supply", value: rows.filter((complaint) => complaint.category === "water").length },
+    { key: "electricity", label: "Electricity", value: rows.filter((complaint) => complaint.category === "electricity").length },
+    { key: "sanitation", label: "Sanitation", value: rows.filter((complaint) => complaint.category === "sanitation").length },
+    { key: "safety", label: "Public Safety", value: rows.filter((complaint) => complaint.category === "safety").length },
+  ]
+    .concat(
+      rows.some((complaint) => complaint.category === "other")
+        ? [
+            {
+              key: "other",
+              label: "Other",
+              value: rows.filter((complaint) => complaint.category === "other").length,
+            },
+          ]
+        : [],
+    )
+    .sort((a, b) => b.value - a.value || a.label.localeCompare(b.label));
+  const maxCategoryCount = Math.max(1, ...categoryRows.map((row) => row.value));
+  const latestTrend = trendData[trendData.length - 1] ?? { label: "", reports: 0, resolved: 0 };
+  const hasTrendHistory = trendData.some((bucket) => bucket.reports > 0 || bucket.resolved > 0);
 
   if (complaints.isLoading) {
     return (
@@ -127,45 +162,147 @@ function DepartmentDashboard() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.5fr_1fr]">
-        <ChartFrame title="Complaint trends" subtitle="Reports vs resolved, last 6 months">
-          <TrendChart data={monthlyTrend(rows)} />
+        <ChartFrame
+          title="Complaint trends"
+          subtitle={
+            hasTrendHistory
+              ? `${latestTrend.reports} submitted this month • ${latestTrend.resolved} resolved`
+              : "No complaint history yet — monthly totals will appear here once reports are created."
+          }
+          action={
+            <div className="flex flex-wrap justify-end gap-2 text-[11px] text-muted-foreground">
+              <span className="rounded-full bg-muted px-2 py-1">Reports: {latestTrend.reports}</span>
+              <span className="rounded-full bg-muted px-2 py-1">Resolved: {latestTrend.resolved}</span>
+            </div>
+          }
+        >
+          <div className="flex h-full flex-col gap-3">
+            <div className="h-[170px]">
+              <TrendChart data={trendData} />
+            </div>
+            {!hasTrendHistory ? (
+              <p className="text-xs text-muted-foreground">
+                Sparse data is expected in early rollout; this view fills in automatically as complaints are submitted and closed.
+              </p>
+            ) : null}
+          </div>
         </ChartFrame>
-        <ChartFrame title="Stage distribution" subtitle="Where the backlog sits right now">
-          <StatusPie data={statusBreakdown(rows)} />
+        <ChartFrame
+          title="Stage distribution"
+          subtitle="Current distribution of complaints across workflow stages"
+        >
+          <div className="flex h-full flex-col gap-3">
+            <ul className="space-y-3">
+              {stageRows.map((row) => (
+                <li key={row.status} className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-3 text-xs">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span
+                        className={
+                          "inline-block h-2.5 w-2.5 rounded-full border border-current " +
+                          {
+                            submitted: "bg-info/80 text-info",
+                            under_review: "bg-warning/80 text-warning",
+                            assigned: "bg-primary/80 text-primary",
+                            in_progress: "bg-accent/80 text-accent-foreground",
+                            completed: "bg-success/80 text-success",
+                          }[row.status]
+                        }
+                      />
+                      <span className="truncate font-medium text-foreground">{row.label}</span>
+                    </div>
+                    <span className="shrink-0 font-medium text-foreground">
+                      {row.value} ({((row.value / complaintTotal) * 100).toFixed(0)}%)
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={
+                        "h-full rounded-full " +
+                        {
+                          submitted: "bg-info",
+                          under_review: "bg-warning",
+                          assigned: "bg-primary",
+                          in_progress: "bg-accent",
+                          completed: "bg-success",
+                        }[row.status]
+                      }
+                      style={{ width: `${(row.value / complaintTotal) * 100}%` }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
         </ChartFrame>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-        <ChartFrame title="Category load" subtitle="Volume by issue type">
-          <CategoryChart data={categoryBreakdown(rows)} />
+        <ChartFrame title="Category load" subtitle="Complaint volume by department">
+          <div className="flex h-full flex-col gap-3">
+            {rows.length ? (
+              <ul className="space-y-3">
+                {categoryRows.map((category) => (
+                  <li key={category.key} className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="truncate text-muted-foreground">{category.label}</span>
+                      <span className="shrink-0 font-medium text-foreground">
+                        {category.value} ({((category.value / complaintTotal) * 100).toFixed(0)}%)
+                      </span>
+                    </div>
+                    <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-warning/70 to-critical"
+                        style={{ width: `${(category.value / maxCategoryCount) * 100}%` }}
+                      />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <EmptyState
+                icon={CheckCircle2}
+                title="No complaints yet"
+                description="Complaint volume by department will appear here once reports are submitted."
+                className="border-0 bg-transparent shadow-none"
+              />
+            )}
+          </div>
         </ChartFrame>
 
         <section className="surface-card p-5">
-          <h3 className="text-sm font-semibold">District heat map</h3>
+          <h3 className="text-sm font-semibold">District workload</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Intensity scaled to total reports; critical counts shown on the right.
+            Live totals, pending, critical and average resolution time for each district.
           </p>
           <ul className="mt-4 space-y-3">
             {!districtRows.length ? (
               <li className="py-3 text-sm text-muted-foreground">No district data yet.</li>
             ) : null}
             {districtRows.map((district) => (
-              <li key={district.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center justify-between gap-2">
+              <li key={district.id} className="rounded-xl border border-border bg-muted/20 p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{district.name}</p>
-                    <p className="shrink-0 text-xs text-muted-foreground">{district.total} reports</p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">
+                      {district.total} total reports
+                    </p>
                   </div>
-                  <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="animate-grow-x h-full rounded-full bg-gradient-to-r from-warning/70 to-critical"
-                      style={{ width: `${(district.total / maxDistrict) * 100}%` }}
-                    />
-                  </div>
+                  <span className="shrink-0 rounded-md bg-critical/10 px-2 py-1 text-[11px] font-semibold text-critical">
+                    {district.critical} critical
+                  </span>
                 </div>
-                <span className="shrink-0 rounded-md bg-critical/10 px-2 py-1 text-xs font-semibold text-critical">
-                  {district.critical} critical
-                </span>
+                <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="animate-grow-x h-full rounded-full bg-gradient-to-r from-warning/70 to-critical"
+                    style={{ width: `${(district.total / maxDistrict) * 100}%` }}
+                  />
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
+                  <span>{district.pending} pending</span>
+                  <span>{district.completed} completed</span>
+                  <span>{formatHours(district.avgResolution)}</span>
+                </div>
               </li>
             ))}
           </ul>
@@ -234,16 +371,6 @@ function DepartmentDashboard() {
           </ul>
         </section>
       </div>
-
-      <section className="space-y-4">
-        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-          <h2 className="min-w-0 truncate text-lg font-semibold">Recent activity</h2>
-          <Button asChild variant="ghost" size="sm" className="shrink-0">
-            <Link to="/analytics">Open analytics</Link>
-          </Button>
-        </div>
-        <ActivityFeed limit={8} />
-      </section>
 
       <AiSection
         title="Preventive maintenance recommendations"

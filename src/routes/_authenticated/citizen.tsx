@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, redirect } from "@tanstack/react-router";
 import { Bell, CheckCircle2, ClipboardList, Clock, PlusCircle, ThumbsUp } from "lucide-react";
 
 import { ActivityFeed } from "@/components/civic/ActivityFeed";
@@ -14,6 +14,9 @@ import { summarize, volumeDelta } from "@/lib/analytics";
 import { useComplaints, useNotifications } from "@/lib/queries";
 
 export const Route = createFileRoute("/_authenticated/citizen")({
+  beforeLoad: ({ context }) => {
+    if (context.role !== "citizen") throw redirect({ to: "/dashboard" });
+  },
   head: () => ({
     meta: [
       { title: "Citizen dashboard — CivicAI" },
