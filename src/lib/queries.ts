@@ -292,9 +292,19 @@ export function useCreateComplaint(citizenId?: string) {
       departmentId: string | null;
       reporterName: string;
       reporterPhone: string | null;
-      imageFile?: File | null;
+      imageFile: File;
+      imageValidation: {
+        imageRelevant: boolean;
+        imageRelevanceReason: string;
+      };
     }) => {
       if (!citizenId) throw new Error("Sign in to submit a report");
+      if (!input.imageValidation.imageRelevant) {
+        throw new Error(
+          input.imageValidation.imageRelevanceReason ||
+            "Upload a clearer photo that visibly supports this civic complaint.",
+        );
+      }
 
       const { data, error } = await supabase
         .from("complaints")
@@ -327,16 +337,14 @@ export function useCreateComplaint(citizenId?: string) {
         changed_by_name: input.reporterName,
       });
 
-      if (input.imageFile) {
-        const url = await uploadComplaintImage(input.imageFile, citizenId);
-        if (url) {
-          await supabase.from("complaint_images").insert({
-            complaint_id: data.id,
-            image_url: url,
-            kind: "before",
-            uploaded_by: citizenId,
-          });
-        }
+      const url = await uploadComplaintImage(input.imageFile, citizenId);
+      if (url) {
+        await supabase.from("complaint_images").insert({
+          complaint_id: data.id,
+          image_url: url,
+          kind: "before",
+          uploaded_by: citizenId,
+        });
       }
 
       return data.id;

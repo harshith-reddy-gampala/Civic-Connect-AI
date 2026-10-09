@@ -8,6 +8,8 @@ export type AiUnderstanding = {
   suggestedDepartmentCode: string;
   summary: string;
   confidence: number;
+  imageRelevant: boolean;
+  imageRelevanceReason: string;
 };
 
 /** Module 2 — Duplicate detection */

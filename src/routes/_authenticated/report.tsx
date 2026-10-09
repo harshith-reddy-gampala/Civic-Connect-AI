@@ -157,6 +157,7 @@ function ReportPage() {
     !!understanding.data &&
     !understanding.isPending &&
     !understanding.isError &&
+    understanding.data.imageRelevant &&
     analysisFingerprint === currentAnalysisFingerprint;
 
   useEffect(() => {
@@ -314,12 +315,12 @@ function ReportPage() {
 
   async function runUnderstanding() {
     const values = getValues();
-    if (mode === "live" && !file) {
-      toast.error("Capture a camera photo before running AI analysis");
+    if (!file || !imageData) {
+      toast.error("Add a clear photo of the civic problem before running AI analysis");
       return;
     }
-    if (values.description.trim().length < 10 && !imageData) {
-      toast.error("Add a photo or a longer description before running AI analysis");
+    if (values.description.trim().length < 10) {
+      toast.error("Add a longer description before running AI analysis");
       return;
     }
     const address = mode === "live" ? derivedAddress : values.address.trim();
@@ -359,7 +360,7 @@ function ReportPage() {
     setSubmitting(true);
     try {
       if (!analysisCurrent) {
-        toast.error("Analyse the current complaint details before submitting the report.");
+        toast.error("Upload a relevant photo and analyse the current complaint details before submitting.");
         return;
       }
 
@@ -374,8 +375,8 @@ function ReportPage() {
         toast.error("Capture a GPS location inside a supported district before submitting.");
         return;
       }
-      if (mode === "live" && !file) {
-        toast.error("Capture a camera photo before submitting.");
+      if (!file || !imageData) {
+        toast.error("Upload a clear photo of the civic problem before submitting.");
         return;
       }
       const address = mode === "live" ? derivedAddress : values.address.trim();
@@ -418,6 +419,10 @@ function ReportPage() {
         reporterName: me?.profile?.full_name || me?.email || "Citizen",
         reporterPhone: me?.profile?.phone ?? null,
         imageFile: file,
+        imageValidation: {
+          imageRelevant: understanding.data.imageRelevant,
+          imageRelevanceReason: understanding.data.imageRelevanceReason,
+        },
       });
 
       // Modules 1 + 3 + 4: classify, score and auto-assign. Never blocks submission.
@@ -743,6 +748,15 @@ function ReportPage() {
                   </div>
                 </dl>
                 <p className="text-xs text-muted-foreground">{understanding.data.summary}</p>
+                <p
+                  className={`text-xs font-medium ${
+                    understanding.data.imageRelevant ? "text-success" : "text-destructive"
+                  }`}
+                >
+                  {understanding.data.imageRelevant
+                    ? `Photo accepted: ${understanding.data.imageRelevanceReason}`
+                    : `Photo rejected: ${understanding.data.imageRelevanceReason}`}
+                </p>
                 <ConfidenceMeter value={understanding.data.confidence} />
                 <p className="text-xs text-muted-foreground">
                   Category, severity, department and infrastructure classification are controlled by

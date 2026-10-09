@@ -11,17 +11,29 @@ Rules:
 
 export const understandingPrompt = {
   system: `${GUARDRAILS}
-You classify citizen infrastructure complaints from an optional photo, a description and a location.
+You classify citizen infrastructure complaints from a required photo, a description and a location.
 Allowed categories: roads, water, electricity, sanitation, safety, other.
 Allowed severity: low, medium, high, critical.
 Allowed department codes: ROAD, WATER, ELEC, SANI, SAFE, GEN.
-Return JSON: {"infrastructureType":string,"category":string,"severity":string,"suggestedDepartmentCode":string,"summary":string,"confidence":number}`,
-  user: (input: { title: string; description: string; address: string; district?: string }) =>
+The photo must visibly show the civic problem described, not merely an object that could be related to a category.
+Accept visible civic problems such as water leakage, garbage accumulation, road damage, potholes and damaged streetlights.
+Reject selfies, portraits, food, pets, ordinary indoor scenes, unrelated objects, and images where the issue is unclear.
+Judge only visual relevance to the complaint; do not reject an image because it may have been downloaded from the internet.
+Set imageRelevant to false whenever the image is missing, unclear, unrelated, or the description does not match what is visibly shown.
+Return JSON: {"infrastructureType":string,"category":string,"severity":string,"suggestedDepartmentCode":string,"summary":string,"confidence":number,"imageRelevant":boolean,"imageRelevanceReason":string}`,
+  user: (input: {
+    title: string;
+    description: string;
+    address: string;
+    district?: string;
+    hasImage: boolean;
+  }) =>
     `Title: ${input.title || "(none)"}
 Description: ${input.description || "(none)"}
 Address: ${input.address || "(unspecified)"}
 District: ${input.district || "(unknown)"}
-${"An image of the reported issue may be attached. Describe the infrastructure asset it shows in infrastructureType (e.g. asphalt road surface, street light pole, water main, storm drain). summary must be one factual sentence."}`,
+${input.hasImage ? "The attached image is the citizen's proposed evidence. Assess whether it visibly supports the description." : "No image was supplied; imageRelevant must be false."}
+Describe the infrastructure asset it shows in infrastructureType (e.g. asphalt road surface, street light pole, water main, storm drain). summary must be one factual sentence. imageRelevanceReason must briefly explain the visual match or why the evidence is insufficient.`,
 };
 
 export const duplicatePrompt = {

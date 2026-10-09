@@ -61,7 +61,7 @@ export async function understandComplaint(input: {
 }): Promise<AiUnderstanding> {
   const raw = await runAiJson<Record<string, unknown>>({
     system: understandingPrompt.system,
-    user: understandingPrompt.user(input),
+    user: understandingPrompt.user({ ...input, hasImage: !!input.imageUrl }),
     images: [input.imageUrl],
   });
 
@@ -83,6 +83,11 @@ export async function understandComplaint(input: {
       text(raw["suggestedDepartmentCode"]).toUpperCase() || codeByCategory[category] || "GEN",
     summary: text(raw["summary"], "No summary available."),
     confidence: clampConfidence(raw["confidence"]),
+    imageRelevant: raw["imageRelevant"] === true && !!input.imageUrl,
+    imageRelevanceReason: text(
+      raw["imageRelevanceReason"],
+      "The image does not provide clear, relevant evidence for this complaint.",
+    ),
   };
 }
 

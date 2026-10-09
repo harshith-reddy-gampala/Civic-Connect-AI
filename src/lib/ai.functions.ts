@@ -139,6 +139,8 @@ export const aiTriageComplaint = createServerFn({ method: "POST" })
             suggestedDepartmentCode: z.string(),
             summary: z.string(),
             confidence: z.number(),
+            imageRelevant: z.boolean(),
+            imageRelevanceReason: z.string(),
           })
           .optional(),
       })
