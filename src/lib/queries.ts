@@ -7,6 +7,7 @@ import type { ComplaintStatus } from "@/lib/civic";
 import { STALE_TIME } from "@/lib/constants";
 import type { Tables } from "@/integrations/supabase/types";
 import { notifyComplaintCitizen } from "@/lib/notifications.functions";
+import { submitComplaint, updateComplaintStatus } from "@/lib/ai.functions";
 
 export type District = Tables<"districts">;
 export type Department = Tables<"departments">;
@@ -80,7 +81,10 @@ export function useComplaints(filters?: {
     queryKey: ["complaints", filters ?? null],
     staleTime: STALE_TIME.list,
     queryFn: async () => {
-      let query = supabase.from("complaints").select(COMPLAINT_COLUMNS).order("created_at", { ascending: false });
+      let query = supabase
+        .from("complaints")
+        .select(COMPLAINT_COLUMNS)
+        .order("created_at", { ascending: false });
       if (filters?.citizenId) query = query.eq("citizen_id", filters.citizenId);
       if (filters?.officerId) query = query.eq("officer_id", filters.officerId);
       if (filters?.districtId) query = query.eq("district_id", filters.districtId);
@@ -91,7 +95,6 @@ export function useComplaints(filters?: {
     },
   });
 }
-
 
 export function useComplaint(id: string) {
   return useQuery({
@@ -191,7 +194,6 @@ export function useMarkAllNotificationsRead(userId?: string) {
   });
 }
 
-
 export function useMarkNotificationRead() {
   const qc = useQueryClient();
   return useMutation({
@@ -206,51 +208,27 @@ export function useMarkNotificationRead() {
 export function useUpdateComplaintStatus(actor: { id?: string | undefined; name: string }) {
   const qc = useQueryClient();
   const notifyCitizen = useServerFn(notifyComplaintCitizen);
+  const updateStatus = useServerFn(updateComplaintStatus);
 
   return useMutation({
     mutationFn: async (input: {
       complaintId: string;
       status: ComplaintStatus;
       remarks?: string | undefined;
-      afterImageUrl?: string | null;
-      repairVerificationStatus?: "verified" | "needs_reinspection" | null;
+      afterImageDataUrl?: string | null;
       citizenId?: string | null;
     }) => {
-      if (input.status === "completed" && (!input.afterImageUrl || input.repairVerificationStatus !== "verified")) {
-        throw new Error("Completion requires verified repair evidence.");
-      }
-
-      if (input.afterImageUrl) {
-        const { error } = await supabase.from("complaint_images").insert({
-          complaint_id: input.complaintId,
-          image_url: input.afterImageUrl,
-          kind: "after",
-          uploaded_by: actor.id ?? null,
-        });
-        if (error) throw error;
-      }
-
-      const { error } = await supabase
-        .from("complaints")
-        .update({
+      const result = await updateStatus({
+        data: {
+          complaintId: input.complaintId,
           status: input.status,
-          remarks: input.remarks ?? null,
-          repair_verification_status:
-            input.status === "completed" ? "verified" : null,
-          resolved_at: input.status === "completed" ? new Date().toISOString() : null,
-        })
-        .eq("id", input.complaintId);
-      if (error) throw error;
-
-      await supabase.from("status_history").insert({
-        complaint_id: input.complaintId,
-        status: input.status,
-        remarks: input.remarks ?? null,
-        changed_by: actor.id ?? null,
-        changed_by_name: actor.name,
+          remarks: input.remarks ?? "",
+          afterImageDataUrl: input.afterImageDataUrl ?? null,
+        },
       });
 
-      if (input.citizenId && (input.status === "in_progress" || input.status === "completed")) {
+      const citizenId = result.citizenId ?? input.citizenId;
+      if (citizenId && (input.status === "in_progress" || input.status === "completed")) {
         await notifyCitizen({
           data: {
             complaintId: input.complaintId,
@@ -273,12 +251,15 @@ export async function uploadComplaintImage(file: File, userId: string) {
   const path = `${userId}/${crypto.randomUUID()}-${file.name.replace(/[^\w.-]/g, "_")}`;
   const { error } = await supabase.storage.from("complaint-images").upload(path, file);
   if (error) throw error;
-  const { data } = await supabase.storage.from("complaint-images").createSignedUrl(path, 60 * 60 * 24 * 365);
+  const { data } = await supabase.storage
+    .from("complaint-images")
+    .createSignedUrl(path, 60 * 60 * 24 * 365);
   return data?.signedUrl ?? null;
 }
 
 export function useCreateComplaint(citizenId?: string) {
   const qc = useQueryClient();
+  const submit = useServerFn(submitComplaint);
   return useMutation({
     mutationFn: async (input: {
       title: string;
@@ -290,26 +271,11 @@ export function useCreateComplaint(citizenId?: string) {
       lng: number | null;
       districtId: string | null;
       departmentId: string | null;
-      reporterName: string;
-      reporterPhone: string | null;
-      imageFile: File;
-      imageValidation: {
-        imageRelevant: boolean;
-        imageRelevanceReason: string;
-      };
+      imageDataUrl: string;
     }) => {
       if (!citizenId) throw new Error("Sign in to submit a report");
-      if (!input.imageValidation.imageRelevant) {
-        throw new Error(
-          input.imageValidation.imageRelevanceReason ||
-            "Upload a clearer photo that visibly supports this civic complaint.",
-        );
-      }
-
-      const { data, error } = await supabase
-        .from("complaints")
-        .insert({
-          citizen_id: citizenId,
+      const result = await submit({
+        data: {
           title: input.title,
           description: input.description,
           category: input.category,
@@ -317,37 +283,12 @@ export function useCreateComplaint(citizenId?: string) {
           address: input.address,
           lat: input.lat,
           lng: input.lng,
-          district_id: input.districtId,
-          department_id: input.departmentId,
-          reporter_name: input.reporterName,
-          reporter_phone: input.reporterPhone,
-          // AI placeholder — future model fills these on intake.
-          ai_priority_score: null,
-          ai_category_suggestion: null,
-        })
-        .select("id")
-        .single();
-      if (error) throw error;
-
-      await supabase.from("status_history").insert({
-        complaint_id: data.id,
-        status: "submitted",
-        remarks: "Complaint registered by citizen.",
-        changed_by: citizenId,
-        changed_by_name: input.reporterName,
+          districtId: input.districtId,
+          departmentId: input.departmentId,
+          imageDataUrl: input.imageDataUrl,
+        },
       });
-
-      const url = await uploadComplaintImage(input.imageFile, citizenId);
-      if (url) {
-        await supabase.from("complaint_images").insert({
-          complaint_id: data.id,
-          image_url: url,
-          kind: "before",
-          uploaded_by: citizenId,
-        });
-      }
-
-      return data.id;
+      return result.id;
     },
     onSuccess: () => {
       toast.success("Report submitted");
@@ -373,7 +314,9 @@ export function useRecentActivity(limit = 8) {
         .order("created_at", { ascending: false })
         .limit(limit);
       if (error) throw error;
-      return data as (StatusHistory & { complaints: { title: string; reference: string } | null })[];
+      return data as (StatusHistory & {
+        complaints: { title: string; reference: string } | null;
+      })[];
     },
   });
 }

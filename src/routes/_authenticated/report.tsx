@@ -158,6 +158,8 @@ function ReportPage() {
     !understanding.isPending &&
     !understanding.isError &&
     understanding.data.imageRelevant &&
+    understanding.data.imageScreening.verdict === "likely_authentic" &&
+    understanding.data.imageScreening.confidence >= 0.6 &&
     analysisFingerprint === currentAnalysisFingerprint;
 
   useEffect(() => {
@@ -416,13 +418,7 @@ function ReportPage() {
         lng,
         districtId: districtId || null,
         departmentId: department?.id ?? null,
-        reporterName: me?.profile?.full_name || me?.email || "Citizen",
-        reporterPhone: me?.profile?.phone ?? null,
-        imageFile: file,
-        imageValidation: {
-          imageRelevant: understanding.data.imageRelevant,
-          imageRelevanceReason: understanding.data.imageRelevanceReason,
-        },
+        imageDataUrl: imageData,
       });
 
       // Modules 1 + 3 + 4: classify, score and auto-assign. Never blocks submission.
@@ -757,6 +753,29 @@ function ReportPage() {
                     ? `Photo accepted: ${understanding.data.imageRelevanceReason}`
                     : `Photo rejected: ${understanding.data.imageRelevanceReason}`}
                 </p>
+                <div
+                  className={`rounded-lg border px-3 py-2 text-xs ${
+                    understanding.data.imageScreening.verdict === "likely_authentic"
+                      ? "border-success/30 bg-success/5 text-success"
+                      : "border-warning/30 bg-warning/5 text-warning"
+                  }`}
+                >
+                  <p className="font-medium">
+                    Image authenticity screening:{" "}
+                    {understanding.data.imageScreening.verdict === "likely_authentic"
+                      ? "No strong synthetic-image indicators detected"
+                      : understanding.data.imageScreening.verdict === "uncertain"
+                        ? "Unavailable or inconclusive"
+                        : "Potentially AI-generated or manipulated"}
+                  </p>
+                  <p className="mt-1">{understanding.data.imageScreening.reason}</p>
+                  {understanding.data.imageScreening.verdict !== "likely_authentic" ? (
+                    <p className="mt-1 font-medium">
+                      Retry with an original camera photo or unedited source image. Visual screening
+                      is probabilistic and cannot prove authenticity.
+                    </p>
+                  ) : null}
+                </div>
                 <ConfidenceMeter value={understanding.data.confidence} />
                 <p className="text-xs text-muted-foreground">
                   Category, severity, department and infrastructure classification are controlled by

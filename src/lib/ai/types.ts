@@ -10,6 +10,16 @@ export type AiUnderstanding = {
   confidence: number;
   imageRelevant: boolean;
   imageRelevanceReason: string;
+  imageScreening: AiImageScreening;
+};
+
+export type AiImageScreeningVerdict =
+  "likely_authentic" | "likely_ai_generated" | "likely_manipulated" | "uncertain";
+
+export type AiImageScreening = {
+  verdict: AiImageScreeningVerdict;
+  confidence: number;
+  reason: string;
 };
 
 /** Module 2 — Duplicate detection */
@@ -102,7 +112,5 @@ export function basePriorityScore(input: {
   const impact = Math.min(20, input.supporters * 3);
   const pending = Math.min(14, input.hoursPending / 24 / 2);
   const safetyBoost = ["safety", "electricity", "water"].includes(input.category) ? 6 : 0;
-  return Math.round(
-    Math.min(100, severityWeight[input.severity] + impact + pending + safetyBoost),
-  );
+  return Math.round(Math.min(100, severityWeight[input.severity] + impact + pending + safetyBoost));
 }

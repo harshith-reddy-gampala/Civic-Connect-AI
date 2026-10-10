@@ -12,12 +12,14 @@ import {
   basePriorityScore,
   scoreToPriority,
   type AiDuplicate,
+  type AiImageScreening,
   type AiInsights,
   type AiPriority,
   type AiRepairVerification,
   type AiRouting,
   type AiUnderstanding,
 } from "@/lib/ai/types";
+import { IMAGE_SCREENING_SUSPICIOUS_THRESHOLD } from "@/lib/constants";
 
 const CATEGORIES = ["roads", "water", "electricity", "sanitation", "safety", "other"];
 const SEVERITIES: ComplaintPriority[] = ["low", "medium", "high", "critical"];
@@ -37,10 +39,46 @@ function text(value: unknown, fallback = "") {
   return raw ? raw.slice(0, 600) : fallback;
 }
 
-export function distanceMeters(
-  a: { lat: number; lng: number },
-  b: { lat: number; lng: number },
-) {
+export function normalizeImageScreening(value: unknown): AiImageScreening {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const verdict = raw["verdict"];
+  const confidenceValue = raw["confidence"];
+  const numericConfidence =
+    typeof confidenceValue === "number" ? confidenceValue : Number(confidenceValue);
+  const hasValidConfidence = Number.isFinite(numericConfidence);
+  const confidence = hasValidConfidence ? clampConfidence(numericConfidence) : 0;
+  const reason = text(raw["reason"]);
+
+  if (
+    (verdict !== "likely_authentic" &&
+      verdict !== "likely_ai_generated" &&
+      verdict !== "likely_manipulated" &&
+      verdict !== "uncertain") ||
+    !hasValidConfidence ||
+    !reason
+  ) {
+    return {
+      verdict: "uncertain",
+      confidence: 0,
+      reason: "The image authenticity screening result was incomplete.",
+    };
+  }
+
+  if (
+    (verdict === "likely_ai_generated" || verdict === "likely_manipulated") &&
+    confidence < IMAGE_SCREENING_SUSPICIOUS_THRESHOLD
+  ) {
+    return {
+      verdict: "uncertain",
+      confidence,
+      reason: "The image showed possible editing indicators, but the evidence was not conclusive.",
+    };
+  }
+
+  return { verdict, confidence, reason };
+}
+
+export function distanceMeters(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const R = 6_371_000;
   const dLat = toRad(b.lat - a.lat);
@@ -58,11 +96,13 @@ export async function understandComplaint(input: {
   address: string;
   district?: string;
   imageUrl?: string | null;
+  dedupeScope?: string;
 }): Promise<AiUnderstanding> {
   const raw = await runAiJson<Record<string, unknown>>({
     system: understandingPrompt.system,
     user: understandingPrompt.user({ ...input, hasImage: !!input.imageUrl }),
     images: [input.imageUrl],
+    ...(input.dedupeScope ? { dedupeScope: input.dedupeScope } : {}),
   });
 
   const category = pickCategory(raw["category"]);
@@ -88,6 +128,7 @@ export async function understandComplaint(input: {
       raw["imageRelevanceReason"],
       "The image does not provide clear, relevant evidence for this complaint.",
     ),
+    imageScreening: normalizeImageScreening(raw["imageScreening"]),
   };
 }
 
@@ -187,19 +228,25 @@ export async function computePriority(input: {
 
   const aiScore = Number(raw["score"]);
   const score = Number.isFinite(aiScore)
-    ? Math.round(Math.min(100, Math.max(0, Math.min(baselineScore + 15, Math.max(baselineScore - 15, aiScore)))))
+    ? Math.round(
+        Math.min(
+          100,
+          Math.max(0, Math.min(baselineScore + 15, Math.max(baselineScore - 15, aiScore))),
+        ),
+      )
     : baselineScore;
 
   const factors = Array.isArray(raw["factors"])
-    ? (raw["factors"] as Record<string, unknown>[])
-        .slice(0, 4)
-        .map((f) => ({
-          label: text(f["label"], "Factor").slice(0, 60),
-          weight: Math.max(0, Math.min(40, Math.round(Number(f["weight"]) || 0))),
-        }))
+    ? (raw["factors"] as Record<string, unknown>[]).slice(0, 4).map((f) => ({
+        label: text(f["label"], "Factor").slice(0, 60),
+        weight: Math.max(0, Math.min(40, Math.round(Number(f["weight"]) || 0))),
+      }))
     : [
         { label: `Severity: ${input.severity}`, weight: 30 },
-        { label: `${input.supporters} citizens affected`, weight: Math.min(20, input.supporters * 3) },
+        {
+          label: `${input.supporters} citizens affected`,
+          weight: Math.min(20, input.supporters * 3),
+        },
         { label: `${Math.round(input.hoursPending / 24)} days pending`, weight: 10 },
       ];
 
@@ -334,7 +381,10 @@ export async function verifyRepair(input: {
     ? "repair_completed"
     : "needs_reinspection";
   const observations = Array.isArray(raw["observations"])
-    ? (raw["observations"] as unknown[]).slice(0, 4).map((o) => text(o).slice(0, 160)).filter(Boolean)
+    ? (raw["observations"] as unknown[])
+        .slice(0, 4)
+        .map((o) => text(o).slice(0, 160))
+        .filter(Boolean)
     : [];
 
   return {
@@ -367,7 +417,9 @@ export async function generateInsights(input: {
     temperature: 0.3,
   });
 
-  const list = Array.isArray(raw["recommendations"]) ? (raw["recommendations"] as Record<string, unknown>[]) : [];
+  const list = Array.isArray(raw["recommendations"])
+    ? (raw["recommendations"] as Record<string, unknown>[])
+    : [];
 
   return {
     summary: text(raw["summary"], "Recommendations derived from recent complaint trends."),

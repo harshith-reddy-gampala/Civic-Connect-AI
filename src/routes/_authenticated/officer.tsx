@@ -30,7 +30,6 @@ import { LIMITS } from "@/lib/constants";
 import { fileToDataUrl, useAiRepairVerification } from "@/hooks/useAiModules";
 import { STATUS_META, nextStatuses, relativeTime, type ComplaintStatus } from "@/lib/civic";
 import {
-  uploadComplaintImage,
   useComplaints,
   useOfficers,
   useUpdateComplaintStatus,
@@ -136,11 +135,7 @@ function OfficerQueue() {
         aiNote = ` [AI verification: repair completed · ${Math.round(verification.data.confidence * 100)}% confidence]`;
       }
 
-      let afterImageUrl: string | null = null;
-      if (proof && me?.profile?.id) {
-        afterImageUrl = await uploadComplaintImage(proof, me.profile.id);
-      }
-      if (status === "completed" && !afterImageUrl) {
+      if (status === "completed" && !proofData) {
         throw new Error("The after-repair photo could not be uploaded.");
       }
       const finalRemarks = `${remarks.trim()}${aiNote}`.trim().slice(0, 500);
@@ -148,8 +143,7 @@ function OfficerQueue() {
         complaintId: active.id,
         status,
         remarks: finalRemarks || undefined,
-        afterImageUrl,
-        repairVerificationStatus: status === "completed" ? "verified" : null,
+        afterImageDataUrl: proofData,
         citizenId: active.citizen_id,
       });
       setActiveId(null);

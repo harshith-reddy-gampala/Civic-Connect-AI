@@ -29,5 +29,8 @@ export const LIMITS = {
   imageTypes: ["image/jpeg", "image/png", "image/webp", "image/heic"],
 } as const;
 
+/** High-confidence suspicious screening results block complaint submission. */
+export const IMAGE_SCREENING_SUSPICIOUS_THRESHOLD = 0.85;
+
 /** Months of history used by trend/insight aggregations. */
 export const TREND_MONTHS = 6;

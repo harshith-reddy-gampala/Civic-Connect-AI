@@ -3,12 +3,17 @@ import { z } from "zod";
 
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { AiUnderstanding } from "@/lib/ai/types";
+import { IMAGE_SCREENING_SUSPICIOUS_THRESHOLD, LIMITS } from "@/lib/constants";
 
 /** Columns readable without elevated privileges (reporter contact withheld). */
 const COMPLAINT_COLUMNS =
   "id, reference, citizen_id, title, description, category, status, priority, address, lat, lng, district_id, department_id, officer_id, support_count, remarks, ai_priority_score, ai_category_suggestion, ai_assignment_reason, resolved_at, created_at, updated_at";
 
 const imageSchema = z.string().max(8_000_000).optional().nullable();
+const imageDataUrlSchema = z
+  .string()
+  .regex(/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/, "Unsupported image data")
+  .max(8_000_000);
 
 /** Module 1 — Complaint understanding (pre-submit, no persistence). */
 export const aiAnalyzeComplaint = createServerFn({ method: "POST" })
@@ -24,7 +29,7 @@ export const aiAnalyzeComplaint = createServerFn({ method: "POST" })
       })
       .parse(input),
   )
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
     const { understandComplaint } = await import("@/lib/ai/modules.server");
     return understandComplaint({
       title: data.title,
@@ -32,7 +37,169 @@ export const aiAnalyzeComplaint = createServerFn({ method: "POST" })
       address: data.address,
       ...(data.district ? { district: data.district } : {}),
       imageUrl: data.imageUrl ?? null,
+      dedupeScope: context.userId,
     });
+  });
+
+function screeningMessage(verdict: string) {
+  if (verdict === "likely_ai_generated") {
+    return "This image may be AI-generated. Upload an original camera photo or an unedited source image.";
+  }
+  if (verdict === "likely_manipulated") {
+    return "This image may be heavily manipulated. Upload an original camera photo or an unedited source image.";
+  }
+  if (verdict === "uncertain") {
+    return "Image authenticity screening was inconclusive. Retry with an original camera photo or a clearer source image.";
+  }
+  return "The image did not pass authenticity screening.";
+}
+
+function decodeImageDataUrl(imageDataUrl: string) {
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+=*)$/.exec(imageDataUrl);
+  if (!match) throw new Error("Only JPEG, PNG, and WebP images are supported.");
+  const mimeType = match[1];
+  const encoded = match[2];
+  if (!mimeType || !encoded) throw new Error("The image data is incomplete.");
+  const buffer = Buffer.from(encoded, "base64");
+  if (!buffer.length || buffer.length > LIMITS.imageMaxBytes) {
+    throw new Error("Image must be under 5 MB.");
+  }
+  return { mimeType, buffer };
+}
+
+async function cleanupSubmission(input: { storagePath: string; complaintId?: string }) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const storageResult = await supabaseAdmin.storage
+    .from("complaint-images")
+    .remove([input.storagePath]);
+  const complaintResult = input.complaintId
+    ? await supabaseAdmin.from("complaints").delete().eq("id", input.complaintId)
+    : null;
+  if (storageResult.error || complaintResult?.error) {
+    throw new Error("Submission failed and cleanup could not be completed safely.");
+  }
+}
+
+/**
+ * Final complaint submission boundary. Client analysis is only a preview;
+ * relevance and image screening are recomputed before any complaint row exists.
+ */
+export const submitComplaint = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        title: z.string().trim().min(LIMITS.titleMin).max(LIMITS.titleMax),
+        description: z.string().trim().min(LIMITS.descriptionMin).max(LIMITS.descriptionMax),
+        category: z.enum(["roads", "water", "electricity", "sanitation", "safety", "other"]),
+        priority: z.enum(["low", "medium", "high", "critical"]),
+        address: z.string().trim().max(LIMITS.addressMax),
+        lat: z.number().finite().nullable(),
+        lng: z.number().finite().nullable(),
+        districtId: z.string().uuid().nullable(),
+        departmentId: z.string().uuid().nullable(),
+        imageDataUrl: imageDataUrlSchema,
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { understandComplaint } = await import("@/lib/ai/modules.server");
+    const { buffer, mimeType } = decodeImageDataUrl(data.imageDataUrl);
+    const { data: profile } = await context.supabase
+      .from("profiles")
+      .select("full_name, phone")
+      .eq("id", context.userId)
+      .maybeSingle();
+    const understanding = await understandComplaint({
+      title: data.title,
+      description: data.description,
+      address: data.address,
+      imageUrl: data.imageDataUrl,
+      dedupeScope: context.userId,
+    });
+
+    if (!understanding.imageRelevant) {
+      throw new Error(
+        understanding.imageRelevanceReason ||
+          "Upload a clearer photo that visibly supports this civic complaint.",
+      );
+    }
+    const screening = understanding.imageScreening;
+    if (
+      screening.verdict === "uncertain" ||
+      ((screening.verdict === "likely_ai_generated" ||
+        screening.verdict === "likely_manipulated") &&
+        screening.confidence >= IMAGE_SCREENING_SUSPICIOUS_THRESHOLD)
+    ) {
+      throw new Error(screeningMessage(screening.verdict));
+    }
+
+    const storagePath = `${context.userId}/${crypto.randomUUID()}.jpg`;
+    let complaintId: string | undefined;
+    try {
+      const upload = await context.supabase.storage
+        .from("complaint-images")
+        .upload(storagePath, new Blob([buffer], { type: mimeType }), {
+          contentType: mimeType,
+          upsert: false,
+        });
+      if (upload.error) throw upload.error;
+
+      const { data: complaint, error: complaintError } = await context.supabase
+        .from("complaints")
+        .insert({
+          citizen_id: context.userId,
+          title: data.title,
+          description: data.description,
+          category: data.category,
+          priority: data.priority,
+          address: data.address,
+          lat: data.lat,
+          lng: data.lng,
+          district_id: data.districtId,
+          department_id: data.departmentId,
+          reporter_name: profile?.full_name || "Citizen",
+          reporter_phone: profile?.phone ?? null,
+          ai_priority_score: null,
+          ai_category_suggestion: null,
+        })
+        .select("id")
+        .single();
+      if (complaintError || !complaint) {
+        throw complaintError ?? new Error("Complaint was not created.");
+      }
+      complaintId = complaint.id;
+
+      const signed = await context.supabase.storage
+        .from("complaint-images")
+        .createSignedUrl(storagePath, 60 * 60 * 24);
+      if (signed.error || !signed.data?.signedUrl) {
+        throw signed.error ?? new Error("Could not secure the uploaded image.");
+      }
+
+      const { error: imageError } = await context.supabase.from("complaint_images").insert({
+        complaint_id: complaint.id,
+        image_url: signed.data.signedUrl,
+        kind: "before",
+        uploaded_by: context.userId,
+      });
+      if (imageError) throw imageError;
+
+      const { error: historyError } = await context.supabase.from("status_history").insert({
+        complaint_id: complaint.id,
+        status: "submitted",
+        remarks: "Complaint registered by citizen.",
+        changed_by: context.userId,
+        changed_by_name: profile?.full_name || "Citizen",
+      });
+      if (historyError) throw historyError;
+
+      return { id: complaint.id, understanding };
+    } catch (error) {
+      const cleanupInput = complaintId ? { storagePath, complaintId } : { storagePath };
+      await cleanupSubmission(cleanupInput);
+      throw error;
+    }
   });
 
 /** Module 2 — Duplicate detection (pre-submit). */
@@ -57,7 +224,9 @@ export const aiCheckDuplicate = createServerFn({ method: "POST" })
 
     const { data: open } = await supabase
       .from("complaints")
-      .select("id, reference, title, description, category, address, lat, lng, support_count, status")
+      .select(
+        "id, reference, title, description, category, address, lat, lng, support_count, status",
+      )
       .neq("status", "completed")
       .order("created_at", { ascending: false })
       .limit(60);
@@ -80,7 +249,10 @@ export const aiCheckDuplicate = createServerFn({ method: "POST" })
       const { data: images } = await supabase
         .from("complaint_images")
         .select("complaint_id, image_url, kind")
-        .in("complaint_id", scored.map((entry) => entry.row.id))
+        .in(
+          "complaint_id",
+          scored.map((entry) => entry.row.id),
+        )
         .eq("kind", "before");
       for (const image of images ?? []) {
         if (!imagesByComplaint.has(image.complaint_id)) {
@@ -141,15 +313,24 @@ export const aiTriageComplaint = createServerFn({ method: "POST" })
             confidence: z.number(),
             imageRelevant: z.boolean(),
             imageRelevanceReason: z.string(),
+            imageScreening: z.object({
+              verdict: z.enum([
+                "likely_authentic",
+                "likely_ai_generated",
+                "likely_manipulated",
+                "uncertain",
+              ]),
+              confidence: z.number().min(0).max(1),
+              reason: z.string(),
+            }),
           })
           .optional(),
       })
       .parse(input),
   )
   .handler(async ({ data, context }) => {
-    const { understandComplaint, computePriority, routeComplaint } = await import(
-      "@/lib/ai/modules.server"
-    );
+    const { understandComplaint, computePriority, routeComplaint } =
+      await import("@/lib/ai/modules.server");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const supabase = context.supabase;
 
@@ -179,15 +360,14 @@ export const aiTriageComplaint = createServerFn({ method: "POST" })
 
     const districtName = (districts ?? []).find((d) => d.id === complaint.district_id)?.name;
 
-    const understanding: AiUnderstanding =
-      data.understanding ??
-      (await understandComplaint({
-        title: complaint.title,
-        description: complaint.description,
-        address: complaint.address,
-        ...(districtName ? { district: districtName } : {}),
-        imageUrl: images?.[0]?.image_url ?? null,
-      }));
+    const understanding: AiUnderstanding = await understandComplaint({
+      title: complaint.title,
+      description: complaint.description,
+      address: complaint.address,
+      ...(districtName ? { district: districtName } : {}),
+      imageUrl: images?.[0]?.image_url ?? null,
+      dedupeScope: context.userId,
+    });
 
     const hoursPending = (Date.now() - new Date(complaint.created_at).getTime()) / 3_600_000;
     const priority = await computePriority({
@@ -389,15 +569,156 @@ export const aiVerifyRepair = createServerFn({ method: "POST" })
     return result;
   });
 
+/**
+ * Authenticated officer status boundary. Completion is authorized only after
+ * this server function rechecks the persisted before image and the submitted
+ * after image; client verification flags are never accepted.
+ */
+export const updateComplaintStatus = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        complaintId: z.string().uuid(),
+        status: z.enum(["submitted", "under_review", "assigned", "in_progress", "completed"]),
+        remarks: z.string().max(500).default(""),
+        afterImageDataUrl: imageDataUrlSchema.optional().nullable(),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data, context }) => {
+    const { verifyRepair } = await import("@/lib/ai/modules.server");
+    const [{ data: complaint }, { data: officer }, { data: profile }] = await Promise.all([
+      context.supabase
+        .from("complaints")
+        .select("id, title, description, category, officer_id, citizen_id")
+        .eq("id", data.complaintId)
+        .maybeSingle(),
+      context.supabase
+        .from("officers")
+        .select("id")
+        .eq("profile_id", context.userId)
+        .maybeSingle(),
+      context.supabase.from("profiles").select("full_name").eq("id", context.userId).maybeSingle(),
+    ]);
+
+    if (!complaint || !officer || complaint.officer_id !== officer.id) {
+      throw new Error("You are not authorized to update this complaint.");
+    }
+
+    if (data.status === "completed" && !data.afterImageDataUrl) {
+      throw new Error("Completion requires an after-repair photo.");
+    }
+
+    const { data: beforeImages } = await context.supabase
+      .from("complaint_images")
+      .select("image_url")
+      .eq("complaint_id", data.complaintId)
+      .eq("kind", "before")
+      .order("created_at", { ascending: true })
+      .limit(1);
+    const beforeImageUrl = beforeImages?.[0]?.image_url;
+
+    if (data.status === "completed" && !beforeImageUrl) {
+      throw new Error("Completion requires the original complaint photo.");
+    }
+
+    if (data.status === "completed" && beforeImageUrl && data.afterImageDataUrl) {
+      const verification = await verifyRepair({
+        title: complaint.title,
+        description: complaint.description,
+        category: complaint.category,
+        remarks: data.remarks,
+        beforeImageUrl,
+        afterImageUrl: data.afterImageDataUrl,
+      });
+      if (verification.verdict !== "repair_completed") {
+        throw new Error("Repair must be reinspected before this issue can be completed.");
+      }
+    }
+
+    const decodedAfter = data.afterImageDataUrl
+      ? decodeImageDataUrl(data.afterImageDataUrl)
+      : null;
+    const storagePath = decodedAfter
+      ? `${context.userId}/${crypto.randomUUID()}.jpg`
+      : null;
+    let insertedImageId: string | undefined;
+
+    try {
+      if (decodedAfter && storagePath) {
+        const upload = await context.supabase.storage
+          .from("complaint-images")
+          .upload(storagePath, new Blob([decodedAfter.buffer], { type: decodedAfter.mimeType }), {
+            contentType: decodedAfter.mimeType,
+            upsert: false,
+          });
+        if (upload.error) throw upload.error;
+
+        const signed = await context.supabase.storage
+          .from("complaint-images")
+          .createSignedUrl(storagePath, 60 * 60 * 24);
+        if (signed.error || !signed.data?.signedUrl) {
+          throw signed.error ?? new Error("Could not secure the uploaded image.");
+        }
+
+        const { data: image, error: imageError } = await context.supabase
+          .from("complaint_images")
+          .insert({
+            complaint_id: data.complaintId,
+            image_url: signed.data.signedUrl,
+            kind: "after",
+            uploaded_by: context.userId,
+          })
+          .select("id")
+          .single();
+        if (imageError || !image) throw imageError ?? new Error("Could not save repair evidence.");
+        insertedImageId = image.id;
+      }
+
+      const { error: complaintError } = await context.supabase
+        .from("complaints")
+        .update({
+          status: data.status,
+          remarks: data.remarks || null,
+          repair_verification_status: data.status === "completed" ? "verified" : null,
+          resolved_at: data.status === "completed" ? new Date().toISOString() : null,
+        })
+        .eq("id", data.complaintId);
+      if (complaintError) throw complaintError;
+
+      const { error: historyError } = await context.supabase.from("status_history").insert({
+        complaint_id: data.complaintId,
+        status: data.status,
+        remarks: data.remarks || null,
+        changed_by: context.userId,
+        changed_by_name: profile?.full_name || "Field officer",
+      });
+      if (historyError) throw historyError;
+
+      return { citizenId: complaint.citizen_id };
+    } catch (error) {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      if (storagePath) await supabaseAdmin.storage.from("complaint-images").remove([storagePath]);
+      if (insertedImageId) await supabaseAdmin.from("complaint_images").delete().eq("id", insertedImageId);
+      throw error;
+    }
+  });
+
 /** Module 6 — predictive preventive-maintenance insights. */
 export const aiPredictiveInsights = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) => z.object({ months: z.number().min(1).max(24).default(6) }).parse(input))
+  .inputValidator((input: unknown) =>
+    z.object({ months: z.number().min(1).max(24).default(6) }).parse(input),
+  )
   .handler(async ({ data, context }) => {
     const { generateInsights } = await import("@/lib/ai/modules.server");
     const supabase = context.supabase;
 
-    const { data: roles } = await supabase.from("user_roles").select("role").eq("user_id", context.userId);
+    const { data: roles } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", context.userId);
     const isAdmin = (roles ?? []).some((row) => row.role === "department_admin");
 
     if (!isAdmin) {
@@ -418,7 +739,10 @@ export const aiPredictiveInsights = createServerFn({ method: "POST" })
       (districts ?? []).find((d) => d.id === id)?.name ?? "Unmapped";
 
     const categoryMap = new Map<string, { total: number; completed: number; hours: number[] }>();
-    const districtMap = new Map<string, { total: number; critical: number; categories: Set<string> }>();
+    const districtMap = new Map<
+      string,
+      { total: number; critical: number; categories: Set<string> }
+    >();
     const recurringMap = new Map<string, number>();
 
     for (const row of rows) {
@@ -435,7 +759,11 @@ export const aiPredictiveInsights = createServerFn({ method: "POST" })
       categoryMap.set(row.category, cat);
 
       const name = districtName(row.district_id);
-      const dist = districtMap.get(name) ?? { total: 0, critical: 0, categories: new Set<string>() };
+      const dist = districtMap.get(name) ?? {
+        total: 0,
+        critical: 0,
+        categories: new Set<string>(),
+      };
       dist.total += 1;
       if (row.priority === "critical") dist.critical += 1;
       dist.categories.add(row.category);

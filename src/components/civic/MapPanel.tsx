@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { MapPin, Minus, Plus } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -86,7 +86,7 @@ const markerTone: Record<ComplaintPriority, string> = {
  * instantly inside dashboards. Markers are positioned from stored complaint
  * coordinates and the map auto-fits the district marker set for the officer view.
  */
-export function MapPanel({
+export const MapPanel = memo(function MapPanel({
   center,
   markers,
   zoom = DEFAULT_ZOOM,
@@ -108,6 +108,9 @@ export function MapPanel({
     startY: number;
     originCenter: { lat: number; lng: number };
   } | null>(null);
+  const dragFrameRef = useRef<number | null>(null);
+  const retryTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const tileRetryRef = useRef(new Set<string>());
 
   useEffect(() => {
     const node = containerRef.current;
@@ -140,28 +143,62 @@ export function MapPanel({
     }
   }, [center, markers, viewport.height, viewport.width, zoom]);
 
-  const centerPx = useMemo(() => project(view.center.lat, view.center.lng, view.zoom), [view.center, view.zoom]);
+  useEffect(
+    () => () => {
+      if (dragFrameRef.current !== null) {
+        cancelAnimationFrame(dragFrameRef.current);
+      }
+      retryTimersRef.current.forEach((timer) => clearTimeout(timer));
+    },
+    [],
+  );
+
+  const centerPx = useMemo(
+    () => project(view.center.lat, view.center.lng, view.zoom),
+    [view.center, view.zoom],
+  );
 
   const tiles = useMemo(() => {
     const centerTileX = Math.floor(centerPx.x / TILE);
     const centerTileY = Math.floor(centerPx.y / TILE);
-    const out: { key: string; url: string; left: number; top: number }[] = [];
-    for (let dx = -3; dx <= 3; dx++) {
-      for (let dy = -2; dy <= 2; dy++) {
+    const viewportWidth = viewport.width || 900;
+    const viewportHeight = viewport.height || 440;
+    const halfWidth = viewportWidth / 2;
+    const halfHeight = viewportHeight / 2;
+    const minDx = Math.floor(-halfWidth / TILE) - 1;
+    const maxDx = Math.floor(halfWidth / TILE) + 1;
+    const minDy = Math.floor(-halfHeight / TILE) - 1;
+    const maxDy = Math.floor(halfHeight / TILE) + 1;
+    const out: {
+      key: string;
+      url: string;
+      left: number;
+      top: number;
+      visible: boolean;
+    }[] = [];
+    for (let dx = minDx; dx <= maxDx; dx++) {
+      for (let dy = minDy; dy <= maxDy; dy++) {
         const tx = centerTileX + dx;
         const ty = centerTileY + dy;
         if (ty < 0 || ty >= 2 ** view.zoom) continue;
         const wrapped = ((tx % 2 ** view.zoom) + 2 ** view.zoom) % 2 ** view.zoom;
+        const left = tx * TILE - centerPx.x;
+        const top = ty * TILE - centerPx.y;
         out.push({
-          key: `${tx}-${ty}`,
+          key: `${view.zoom}-${tx}-${ty}`,
           url: `https://tile.openstreetmap.org/${view.zoom}/${wrapped}/${ty}.png`,
-          left: tx * TILE - centerPx.x,
-          top: ty * TILE - centerPx.y,
+          left,
+          top,
+          visible:
+            left < halfWidth &&
+            left + TILE > -halfWidth &&
+            top < halfHeight &&
+            top + TILE > -halfHeight,
         });
       }
     }
-    return out;
-  }, [centerPx, view.zoom]);
+    return out.sort((a, b) => Number(b.visible) - Number(a.visible));
+  }, [centerPx, view.zoom, viewport.height, viewport.width]);
 
   const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -188,14 +225,21 @@ export function MapPanel({
 
     const dx = event.clientX - dragRef.current.startX;
     const dy = event.clientY - dragRef.current.startY;
-    const originPx = project(dragRef.current.originCenter.lat, dragRef.current.originCenter.lng, view.zoom);
-    const nextPx = { x: originPx.x - dx, y: originPx.y - dy };
-    const nextCenter = unproject(nextPx.x, nextPx.y, view.zoom);
+    if (dragFrameRef.current !== null) return;
 
-    setView((current) => ({
-      ...current,
-      center: nextCenter,
-    }));
+    dragFrameRef.current = requestAnimationFrame(() => {
+      dragFrameRef.current = null;
+      setView((current) => {
+        if (!dragRef.current) return current;
+        const originPx = project(
+          dragRef.current.originCenter.lat,
+          dragRef.current.originCenter.lng,
+          current.zoom,
+        );
+        const nextPx = { x: originPx.x - dx, y: originPx.y - dy };
+        return { ...current, center: unproject(nextPx.x, nextPx.y, current.zoom) };
+      });
+    });
   };
 
   const handlePointerEnd = () => {
@@ -205,11 +249,7 @@ export function MapPanel({
   return (
     <div
       ref={containerRef}
-      className={cn(
-        "surface-card relative overflow-hidden bg-muted p-0",
-        height,
-        className,
-      )}
+      className={cn("surface-card relative overflow-hidden bg-muted p-0", height, className)}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerEnd}
@@ -223,11 +263,21 @@ export function MapPanel({
             key={tile.key}
             src={tile.url}
             alt=""
-            loading="lazy"
+            loading={tile.visible ? "eager" : "lazy"}
+            fetchPriority={tile.visible ? "high" : "low"}
             width={TILE}
             height={TILE}
             className="pointer-events-none absolute opacity-95 dark:opacity-70 dark:contrast-125 dark:invert dark:hue-rotate-180"
             style={{ left: `calc(50% + ${tile.left}px)`, top: `calc(50% + ${tile.top}px)` }}
+            onError={(event) => {
+              if (tileRetryRef.current.has(tile.key)) return;
+              tileRetryRef.current.add(tile.key);
+              const image = event.currentTarget;
+              const timer = setTimeout(() => {
+                image.src = tile.url;
+              }, 500);
+              retryTimersRef.current.push(timer);
+            }}
           />
         ))}
 
@@ -271,7 +321,12 @@ export function MapPanel({
       <div className="absolute top-3 right-3 z-10 flex flex-col gap-2">
         <button
           type="button"
-          onClick={() => setView((current) => ({ ...current, zoom: clamp(current.zoom + 1, MIN_ZOOM, MAX_ZOOM) }))}
+          onClick={() =>
+            setView((current) => ({
+              ...current,
+              zoom: clamp(current.zoom + 1, MIN_ZOOM, MAX_ZOOM),
+            }))
+          }
           aria-label="Zoom in"
           className="grid size-9 place-items-center rounded-md border border-border bg-card/90 text-muted-foreground shadow-sm hover:bg-card"
         >
@@ -279,7 +334,12 @@ export function MapPanel({
         </button>
         <button
           type="button"
-          onClick={() => setView((current) => ({ ...current, zoom: clamp(current.zoom - 1, MIN_ZOOM, MAX_ZOOM) }))}
+          onClick={() =>
+            setView((current) => ({
+              ...current,
+              zoom: clamp(current.zoom - 1, MIN_ZOOM, MAX_ZOOM),
+            }))
+          }
           aria-label="Zoom out"
           className="grid size-9 place-items-center rounded-md border border-border bg-card/90 text-muted-foreground shadow-sm hover:bg-card"
         >
@@ -292,4 +352,32 @@ export function MapPanel({
       </div>
     </div>
   );
+}, areMapPropsEqual);
+
+function areMapPropsEqual(
+  previous: React.ComponentProps<typeof MapPanel>,
+  next: React.ComponentProps<typeof MapPanel>,
+) {
+  if (
+    previous.zoom !== next.zoom ||
+    previous.height !== next.height ||
+    previous.className !== next.className ||
+    previous.center.lat !== next.center.lat ||
+    previous.center.lng !== next.center.lng ||
+    previous.markers.length !== next.markers.length
+  ) {
+    return false;
+  }
+
+  return previous.markers.every((marker, index) => {
+    const nextMarker = next.markers[index];
+    return (
+      marker.id === nextMarker.id &&
+      marker.lat === nextMarker.lat &&
+      marker.lng === nextMarker.lng &&
+      marker.label === nextMarker.label &&
+      marker.priority === nextMarker.priority &&
+      marker.meta === nextMarker.meta
+    );
+  });
 }

@@ -20,7 +20,8 @@ Accept visible civic problems such as water leakage, garbage accumulation, road 
 Reject selfies, portraits, food, pets, ordinary indoor scenes, unrelated objects, and images where the issue is unclear.
 Judge only visual relevance to the complaint; do not reject an image because it may have been downloaded from the internet.
 Set imageRelevant to false whenever the image is missing, unclear, unrelated, or the description does not match what is visibly shown.
-Return JSON: {"infrastructureType":string,"category":string,"severity":string,"suggestedDepartmentCode":string,"summary":string,"confidence":number,"imageRelevant":boolean,"imageRelevanceReason":string}`,
+Authenticity screening is probabilistic visual inspection only and cannot prove that an image is genuine or generated. Look for possible synthetic or heavy-editing indicators such as inconsistent geometry, lighting, text, reflections, repeated textures, or compositing. Missing or weak evidence must be reported as uncertain, never likely_authentic.
+Return JSON: {"infrastructureType":string,"category":string,"severity":string,"suggestedDepartmentCode":string,"summary":string,"confidence":number,"imageRelevant":boolean,"imageRelevanceReason":string,"imageScreening":{"verdict":"likely_authentic"|"likely_ai_generated"|"likely_manipulated"|"uncertain","confidence":number,"reason":string}}`,
   user: (input: {
     title: string;
     description: string;
@@ -135,7 +136,12 @@ Return at most 5 recommendations, each rationale under 200 characters and ground
   user: (input: {
     totalComplaints: number;
     windowMonths: number;
-    byCategory: { category: string; total: number; completed: number; avgResolutionHours: number }[];
+    byCategory: {
+      category: string;
+      total: number;
+      completed: number;
+      avgResolutionHours: number;
+    }[];
     byDistrict: { district: string; total: number; critical: number; repeatCategories: string[] }[];
     recurring: { district: string; category: string; count: number }[];
   }) => JSON.stringify(input, null, 2),
